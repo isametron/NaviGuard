@@ -24,6 +24,11 @@ class LMStudioClient:
             base_url=self.settings.base_url,
             api_key=self.settings.api_key,
             timeout=self.settings.timeout_s,
+            # Local inference latency is roughly constant, not transient
+            # network flakiness — retrying won't make a slow generation
+            # faster, it just multiplies wall-clock time before the caller
+            # finds out. Fail once, at the configured timeout.
+            max_retries=0,
         )
 
     def chat(self, system: str, user: str) -> str:

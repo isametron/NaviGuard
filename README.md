@@ -28,6 +28,7 @@ NaviGuard/
 │   ├── llm/                        # LM Studio client + operator-report generation
 │   └── api/                        # FastAPI service (health, predict, anomaly-report)
 ├── scripts/run_pipeline.py         # convenience: generate -> preprocess -> train -> predict
+├── frontend/dashboard.py           # Streamlit dashboard consuming the FastAPI service (optional)
 ├── tests/                          # pytest suite (hermetic — no trained model/LM Studio needed)
 ├── architecture_diagram.py         # generates outputs/architecture_diagram.png
 ├── pyproject.toml
@@ -62,8 +63,14 @@ naviguard serve                     # Step 4: launch the FastAPI service
 naviguard clean                     # (optional) remove generated models/outputs/sequences
 ```
 
-There is no bundled UI today — the system is API-first. A frontend (TypeScript/React) consuming
-the JSON endpoints below is planned as a later phase.
+The system is API-first — the FastAPI service above is the source of truth. An optional
+Streamlit dashboard consumes it purely over HTTP (no direct file reads):
+```bash
+pip install -e ".[frontend]"
+streamlit run frontend/dashboard.py
+# -> http://localhost:8501  (requires the API running — see step 3 above)
+```
+A TypeScript/React frontend consuming the same JSON endpoints is a possible later phase.
 
 ---
 
@@ -120,6 +127,19 @@ Interactive docs: `http://127.0.0.1:8000/docs`.
 
 ---
 
+## 🖥️ Frontend (Dashboard)
+
+`frontend/dashboard.py` is a Streamlit dashboard (visual design by Pratyush Narain) that talks
+to the FastAPI service exclusively over HTTP — telemetry table/charts via `GET /telemetry`,
+the actual-vs-predicted chart via `GET /predict/evaluate`, and the local-LLM operator report
++ severity assessment via `POST /anomaly-report`. It degrades gracefully: a friendly banner if
+the API isn't running, a different one if a request is just slow (e.g. local LLM generation)
+rather than actually unreachable, and a "model not trained yet" banner if artifacts are missing.
+
+Configure the API it points at via `NAVIGUARD_API_URL` (default `http://127.0.0.1:8000`).
+
+---
+
 ## 🤖 Local LLM (LM Studio) Integration
 
 `POST /anomaly-report` can call a local LLM via [LM Studio](https://lmstudio.ai) for two things,
@@ -153,6 +173,7 @@ lstm_attention_satellite.keras + model_meta.json
 Per-step MAE/RMSE + prediction_plot.png
        ↓  [FastAPI service]
 JSON endpoints  +  optional local-LLM anomaly report (LM Studio)
+       ↓  [Streamlit dashboard]  (optional, HTTP-only)
 ```
 
 ---
@@ -183,7 +204,7 @@ Key papers this work builds upon:
 
 Real NavIC/RINEX/IGS data ingestion · classical baselines (ARIMA/SARIMA/Prophet) for comparison ·
 AWS/PySpark ETL for large-scale ingestion · Supabase persistence for historical predictions ·
-Docker + CI · TypeScript/React frontend consuming the API above.
+Docker + CI · a richer TypeScript/React frontend consuming the same API.
 
 ---
 

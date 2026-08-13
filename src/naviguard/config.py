@@ -36,7 +36,7 @@ class LLMSettings(BaseSettings):
     base_url: str = "http://localhost:1234/v1"
     api_key: str = "lm-studio"          # LM Studio ignores the value; openai SDK requires non-empty
     model: str = "local-model"          # override via LLM_MODEL to match the model loaded in LM Studio
-    timeout_s: float = 15.0
+    timeout_s: float = 60.0             # local inference (esp. on CPU) can genuinely take tens of seconds
     max_tokens: int = 400
 
     model_config = SettingsConfigDict(env_prefix="LLM_")

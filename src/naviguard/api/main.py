@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from naviguard.inference.artifacts import ArtifactsNotFoundError
-from naviguard.api.routes import anomaly, health, predict
+from naviguard.api.routes import anomaly, health, predict, telemetry
 
 
 def create_app() -> FastAPI:
@@ -15,6 +15,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(telemetry.router)
     app.include_router(predict.router)
     app.include_router(anomaly.router)
 

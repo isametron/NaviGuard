@@ -68,6 +68,27 @@ def test_health_always_200():
     assert isinstance(body["model_loaded"], bool)
 
 
+def test_telemetry_returns_latest_rows(monkeypatch, tmp_path):
+    import pandas as pd
+
+    csv_path = tmp_path / "telemetry.csv"
+    pd.DataFrame({
+        "sample_id": range(5),
+        "clock_bias_s": [0.1, 0.2, 0.3, 0.4, 0.5],
+        "clock_drift_s_per_s": [0.0] * 5,
+        "ephemeris_error_m": [0.0] * 5,
+    }).to_csv(csv_path, index=False)
+    monkeypatch.setattr("naviguard.api.routes.telemetry.TELEMETRY_CSV", str(csv_path))
+
+    with TestClient(app) as c:
+        resp = c.get("/telemetry?limit=2")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["n_rows"] == 5
+    assert len(body["rows"]) == 2
+    assert body["rows"][-1]["clock_bias_s"] == 0.5
+
+
 def test_model_info_503_when_untrained(monkeypatch, tmp_path):
     monkeypatch.setattr("naviguard.api.routes.health.META_PATH", str(tmp_path / "does_not_exist.json"))
     with TestClient(app) as c:
