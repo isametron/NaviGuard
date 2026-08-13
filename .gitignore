@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+tf_env/
+env/
+venv/
+*.venv
+
+# Data, models, and outputs (generated)
+data/*.npy
+models/*.keras
+models/*.h5
+models/*.hdf5
+models/scaler.pkl
+outputs/
+*.png
+
+# Jupyter
+.ipynb_checkpoints
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
