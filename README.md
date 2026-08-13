@@ -1,7 +1,7 @@
 # 🛰️ NaviGuard: AI-Driven Satellite Clock Intelligence
 **Dept. of AI & DS, BMS College of Engineering | 2025–26**
 
-> An end-to-end LSTM-based prediction pipeline for NavIC/GNSS satellite clock bias
+> An end-to-end attention-LSTM prediction service for NavIC/GNSS satellite clock bias
 > and ephemeris error forecasting — enabling proactive correction over reactive post-hoc adjustment.
 
 ---
@@ -9,27 +9,28 @@
 ## 📁 Project Structure
 
 ```
-satellite_clock_project/
-│
+NaviGuard/
 ├── data/
-│   └── satellite_telemetry.csv     # NavIC/GNSS telemetry (200 samples, 15-min intervals)
-│
+│   └── satellite_telemetry.csv     # NavIC/GNSS telemetry (synthetic, regenerable)
 ├── models/                          # Auto-generated after training
 │   ├── scaler.pkl                  # Fitted MinMaxScaler
-│   └── lstm_satellite.h5           # Best-checkpoint LSTM model
-│
-├── outputs/                         # Auto-generated after prediction
-│   ├── prediction_plot.png          # Actual vs Predicted + Residuals chart
-│   └── architecture_diagram.png     # System architecture visualization
-│
-├── generate_data.py                 # (Re)generate synthetic telemetry CSV
-├── preprocess.py                    # Scale + sliding-window sequence construction
-├── train_lstm.py                    # LSTM model training with EarlyStopping
-├── predict.py                       # Inference, MAE evaluation, plot generation
-├── dashboard.py                     # Streamlit interactive dashboard
-├── run_pipeline.py                  # 🚀 One-click full pipeline runner
-├── architecture_diagram.py          # Generate architecture PNG
-├── NaviGuard_Architecture.drawio    # Draw.io system architecture diagram
+│   ├── lstm_attention_satellite.keras
+│   └── model_meta.json             # seq_len, horizon, best_val_loss, trained_at, ...
+├── outputs/                         # Auto-generated after `predict --save-plot`
+│   └── prediction_plot.png
+├── src/naviguard/                   # The package
+│   ├── config.py                   # paths, SEQ_LEN, HORIZON, LLM settings
+│   ├── cli.py                      # `naviguard <subcommand>` entry point
+│   ├── data/generate.py            # configurable synthetic telemetry simulation
+│   ├── preprocessing/sequences.py  # scaling + sliding-window sequence construction
+│   ├── models/                     # attention-LSTM definition + training
+│   ├── inference/                  # evaluation, forecasting, plotting
+│   ├── llm/                        # LM Studio client + operator-report generation
+│   └── api/                        # FastAPI service (health, predict, anomaly-report)
+├── scripts/run_pipeline.py         # convenience: generate -> preprocess -> train -> predict
+├── tests/                          # pytest suite (hermetic — no trained model/LM Studio needed)
+├── architecture_diagram.py         # generates outputs/architecture_diagram.png
+├── pyproject.toml
 └── requirements.txt
 ```
 
@@ -38,73 +39,133 @@ satellite_clock_project/
 ## ⚡ Quick Start
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# 1. Create a venv and install the package (editable, with dev/test extras)
+python -m venv .venv
+.venv\Scripts\activate            # Windows; use `source .venv/bin/activate` on macOS/Linux
+pip install -e ".[dev]"
 
 # 2. Run the full pipeline in one command
-python run_pipeline.py
+python scripts/run_pipeline.py
 
-# 3. Launch the dashboard
-streamlit run dashboard.py
+# 3. Launch the API
+uvicorn naviguard.api.main:app --reload
+# -> docs at http://127.0.0.1:8000/docs
 ```
 
-Or run each step manually:
+Or run each stage manually via the `naviguard` CLI:
 ```bash
-python generate_data.py    # Step 0: (re)generate CSV
-python preprocess.py       # Step 1: normalize + build sequences
-python train_lstm.py       # Step 2: train LSTM
-python predict.py          # Step 3: evaluate + save plot
-streamlit run dashboard.py # Step 4: launch dashboard
+naviguard generate                  # Step 0: (re)generate telemetry CSV
+naviguard preprocess                # Step 1: scale + build sequences (seq_len=20, horizon=6)
+naviguard train                     # Step 2: train the attention-LSTM
+naviguard predict --save-plot       # Step 3: evaluate + save plot
+naviguard serve                     # Step 4: launch the FastAPI service
+naviguard clean                     # (optional) remove generated models/outputs/sequences
 ```
+
+There is no bundled UI today — the system is API-first. A frontend (TypeScript/React) consuming
+the JSON endpoints below is planned as a later phase.
 
 ---
 
-## 🧠 Model Architecture
+## 🧠 Model Architecture — Attention-Enhanced LSTM
 
-| Layer  | Type    | Units | Parameters                          |
-|--------|---------|-------|--------------------------------------|
-| 1      | LSTM    | 64    | return_sequences=True, input=(20,3) |
-| 2      | Dropout | —     | rate=0.2                             |
-| 3      | LSTM    | 32    | return_sequences=False               |
-| 4      | Dropout | —     | rate=0.2                             |
-| 5      | Dense   | 16    | activation='relu'                    |
-| 6      | Dense   | 1     | Linear output                        |
+| Layer  | Type              | Units | Parameters                              |
+|--------|-------------------|-------|-------------------------------------------|
+| 1      | LSTM              | 64    | return_sequences=True, input=(20,3)      |
+| 2      | Dropout           | —     | rate=0.2                                  |
+| 3      | LSTM              | 32    | return_sequences=True                    |
+| 4      | Dropout           | —     | rate=0.2                                  |
+| 5      | AttentionPooling  | 32    | additive (Bahdanau-style) attention pool |
+| 6      | Dense             | 16    | activation='relu'                         |
+| 7      | Dense             | horizon (6) | Linear output, multi-step forecast  |
 
 - **Optimizer:** Adam (lr=0.001, β₁=0.9, β₂=0.999)
 - **Loss:** Mean Squared Error (MSE)
 - **Callbacks:** EarlyStopping (patience=10) + ModelCheckpoint + ReduceLROnPlateau
 
+The attention layer learns a per-timestep importance score over the 20-step lookback window
+and pools the LSTM outputs accordingly, rather than relying solely on the final hidden state —
+consistent with the LSTM-Attention literature (Cai & Liu, 2024) cited below. The output layer
+forecasts `horizon` steps ahead (default 6 -> 1.5h at 15-min cadence) instead of a single step.
+
 ---
 
 ## 📊 Key Specs
 
-| Parameter        | Value                              |
-|------------------|------------------------------------|
+| Parameter        | Value                                              |
+|------------------|-----------------------------------------------------|
 | Input features   | clock_bias_s, clock_drift_s_per_s, ephemeris_error_m |
-| Sequence length  | 20 steps (5 hours of history)      |
-| Train/Val split  | 80/20 (chronological, no shuffle)  |
-| Sampling rate    | 15 minutes (900 seconds)           |
-| MAE target       | ≤ 50 nanoseconds on test split     |
-| Output unit      | Seconds → converted to μs and ns  |
-| Dashboard URL    | localhost:8501                     |
+| Sequence length  | 20 steps (5 hours of history)                       |
+| Forecast horizon | 6 steps (1.5 hours ahead), configurable              |
+| Train/Val split  | 80/20 (chronological, no shuffle)                    |
+| Sampling rate    | 15 minutes (900 seconds)                             |
+| MAE target       | ≤ 50 nanoseconds on the test split, **step 1 only** — later horizon steps are expected to degrade |
+| Output unit      | Seconds → converted to nanoseconds                   |
+
+---
+
+## 🌐 API
+
+Once trained, `naviguard serve` (or `uvicorn naviguard.api.main:app`) exposes:
+
+| Method | Path               | Description |
+|--------|--------------------|-------------|
+| GET    | `/health`          | Always 200 — reports whether a model/scaler are present |
+| GET    | `/model/info`       | Trained model metadata (503 if not trained yet) |
+| GET    | `/predict/evaluate` | Per-horizon-step MAE/RMSE + actual/predicted/residual series (JSON form of the old PNG) |
+| POST   | `/predict`          | Forecast `horizon` steps ahead from an optional raw telemetry window |
+| POST   | `/anomaly-report`   | Numeric evaluation + threshold check, optionally layered with a local-LLM narrative report and severity assessment |
+
+Interactive docs: `http://127.0.0.1:8000/docs`.
+
+---
+
+## 🤖 Local LLM (LM Studio) Integration
+
+`POST /anomaly-report` can call a local LLM via [LM Studio](https://lmstudio.ai) for two things,
+layered on top of — never replacing — the numeric MAE-threshold check:
+
+1. **Operator report** — a plain-English narration of already-computed prediction stats.
+2. **Severity second-opinion** — a structured `{"severity": "nominal|watch|anomalous", "reasoning": "..."}` reasoning check.
+
+Setup:
+1. Install [LM Studio](https://lmstudio.ai), load a small instruct model (e.g. Llama-3.2-3B-Instruct).
+2. Start its local server (Developer tab → Start Server) — default `http://localhost:1234/v1`.
+3. Call `POST /anomaly-report` with `{"include_llm": true}`.
+
+If LM Studio isn't running, the endpoint still returns `200` with the full numeric analysis —
+`llm_report`/`llm_severity` are `null` and `llm_status` explains what to do. Configure via
+`LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_S` environment variables if needed.
 
 ---
 
 ## 🔗 Pipeline Data Flow
 
 ```
-NavIC/GNSS Source
-       ↓
+NavIC/GNSS Source (synthetic)
+       ↓  [naviguard generate]
 satellite_telemetry.csv
-       ↓  [preprocess.py]
-X_seq.npy + y_seq.npy + scaler.pkl
-       ↓  [train_lstm.py]
-lstm_satellite.h5
-       ↓  [predict.py]
-prediction_plot.png + MAE report
-       ↓  [dashboard.py]
-Streamlit UI @ localhost:8501
+       ↓  [naviguard preprocess]
+X_seq.npy + y_seq.npy + scaler.pkl   (seq_len=20, horizon=6)
+       ↓  [naviguard train]
+lstm_attention_satellite.keras + model_meta.json
+       ↓  [naviguard predict]
+Per-step MAE/RMSE + prediction_plot.png
+       ↓  [FastAPI service]
+JSON endpoints  +  optional local-LLM anomaly report (LM Studio)
 ```
+
+---
+
+## 🧪 Tests
+
+```bash
+pytest -q
+```
+
+The suite is hermetic — it does not require a trained model, generated telemetry, or a running
+LM Studio server. API tests use dependency overrides and fake model/scaler stubs; LLM tests use
+a fake client and an unreachable port rather than a live server.
 
 ---
 
@@ -115,6 +176,14 @@ Key papers this work builds upon:
 2. He S., Liu J. (2023) — LSTM for BDS-3 clock prediction, *GPS Solutions*
 3. Cai C., Liu M. (2024) — LSTM-Attention for BDS, *GPS Solutions*
 4. Bhatt A., Mehta I. (2024) — LSTM for Galileo clock bias, *arXiv:2411.07015*
+
+---
+
+## 🗺️ Roadmap (not yet built)
+
+Real NavIC/RINEX/IGS data ingestion · classical baselines (ARIMA/SARIMA/Prophet) for comparison ·
+AWS/PySpark ETL for large-scale ingestion · Supabase persistence for historical predictions ·
+Docker + CI · TypeScript/React frontend consuming the API above.
 
 ---
 

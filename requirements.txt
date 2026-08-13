@@ -1,7 +1,18 @@
+# Thin mirror of pyproject.toml's [project.dependencies] for graders/CI
+# who just want `pip install -r requirements.txt`. Source of truth is
+# pyproject.toml — prefer `pip install -e .[dev]` for local development.
 numpy>=2.1
 pandas>=2.2
 scikit-learn>=1.5
 tensorflow>=2.17
 matplotlib>=3.9
 joblib>=1.4
-streamlit>=1.35
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.7
+pydantic-settings>=2.4
+openai>=1.40
+
+# Dev / test extras (install alongside for `pytest -q`)
+pytest>=8.0
+httpx>=0.27

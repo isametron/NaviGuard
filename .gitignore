@@ -3,6 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
 # Virtual environments
 tf_env/
 env/
@@ -15,6 +21,7 @@ models/*.keras
 models/*.h5
 models/*.hdf5
 models/scaler.pkl
+models/model_meta.json
 outputs/
 *.png
 
