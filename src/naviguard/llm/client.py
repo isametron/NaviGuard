@@ -43,8 +43,21 @@ class LMStudioClient:
                 ],
             )
             return resp.choices[0].message.content or ""
-        except (APIConnectionError, APITimeoutError, APIError) as e:
+        except APIConnectionError as e:
             raise LMStudioUnavailableError(
                 f"LM Studio not reachable at {self.settings.base_url}. "
                 "Start LM Studio, load a model, and start the local server (Developer tab -> Start Server)."
+            ) from e
+        except APITimeoutError as e:
+            raise LMStudioUnavailableError(
+                f"LM Studio at {self.settings.base_url} timed out after {self.settings.timeout_s}s. "
+                "The local model may be slow to generate — try again, or increase LLM_TIMEOUT_S."
+            ) from e
+        except APIError as e:
+            # The server responded, so it's reachable — the request itself was rejected
+            # (most commonly: LLM_MODEL doesn't match a model actually loaded in LM Studio).
+            raise LMStudioUnavailableError(
+                f"LM Studio at {self.settings.base_url} rejected the request for model "
+                f"'{self.settings.model}': {e}. Check that this model is loaded in LM Studio, "
+                "or set LLM_MODEL to match the model that is."
             ) from e

@@ -1,4 +1,4 @@
-# 🛰️ NaviGuard: AI-Driven Satellite Clock Intelligence
+# NaviGuard: AI-Driven Satellite Clock Intelligence
 **Dept. of AI & DS, BMS College of Engineering | 2025–26**
 
 > An end-to-end attention-LSTM prediction service for NavIC/GNSS satellite clock bias
@@ -6,7 +6,7 @@
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 NaviGuard/
@@ -37,7 +37,7 @@ NaviGuard/
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ```bash
 # 1. Create a venv and install the package (editable, with dev/test extras)
@@ -74,7 +74,7 @@ A TypeScript/React frontend consuming the same JSON endpoints is a possible late
 
 ---
 
-## 🧠 Model Architecture — Attention-Enhanced LSTM
+## Model Architecture — Attention-Enhanced LSTM
 
 | Layer  | Type              | Units | Parameters                              |
 |--------|-------------------|-------|-------------------------------------------|
@@ -97,7 +97,7 @@ forecasts `horizon` steps ahead (default 6 -> 1.5h at 15-min cadence) instead of
 
 ---
 
-## 📊 Key Specs
+## Key Specs
 
 | Parameter        | Value                                              |
 |------------------|-----------------------------------------------------|
@@ -111,7 +111,7 @@ forecasts `horizon` steps ahead (default 6 -> 1.5h at 15-min cadence) instead of
 
 ---
 
-## 🌐 API
+## API
 
 Once trained, `naviguard serve` (or `uvicorn naviguard.api.main:app`) exposes:
 
@@ -127,7 +127,7 @@ Interactive docs: `http://127.0.0.1:8000/docs`.
 
 ---
 
-## 🖥️ Frontend (Dashboard)
+## Frontend (Dashboard)
 
 `frontend/dashboard.py` is a Streamlit dashboard (visual design by Pratyush Narain) that talks
 to the FastAPI service exclusively over HTTP — telemetry table/charts via `GET /telemetry`,
@@ -140,7 +140,7 @@ Configure the API it points at via `NAVIGUARD_API_URL` (default `http://127.0.0.
 
 ---
 
-## 🤖 Local LLM (LM Studio) Integration
+## Local LLM (LM Studio) Integration
 
 `POST /anomaly-report` can call a local LLM via [LM Studio](https://lmstudio.ai) for two things,
 layered on top of — never replacing — the numeric MAE-threshold check:
@@ -159,7 +159,7 @@ If LM Studio isn't running, the endpoint still returns `200` with the full numer
 
 ---
 
-## 🔗 Pipeline Data Flow
+## Pipeline Data Flow
 
 ```
 NavIC/GNSS Source (synthetic)
@@ -178,7 +178,7 @@ JSON endpoints  +  optional local-LLM anomaly report (LM Studio)
 
 ---
 
-## 🧪 Tests
+## Tests
 
 ```bash
 pytest -q
@@ -190,7 +190,7 @@ a fake client and an unreachable port rather than a live server.
 
 ---
 
-## 📚 References
+## References
 
 Key papers this work builds upon:
 1. Huang B., Ji Z. (2021) — SL-LSTM for GPS clock bias, *GPS Solutions*
@@ -200,7 +200,7 @@ Key papers this work builds upon:
 
 ---
 
-## 🗺️ Roadmap (not yet built)
+## Roadmap (not yet built)
 
 Real NavIC/RINEX/IGS data ingestion · classical baselines (ARIMA/SARIMA/Prophet) for comparison ·
 AWS/PySpark ETL for large-scale ingestion · Supabase persistence for historical predictions ·

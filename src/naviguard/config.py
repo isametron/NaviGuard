@@ -35,7 +35,7 @@ MAE_TARGET_NS = 50.0
 class LLMSettings(BaseSettings):
     base_url: str = "http://localhost:1234/v1"
     api_key: str = "lm-studio"          # LM Studio ignores the value; openai SDK requires non-empty
-    model: str = "local-model"          # override via LLM_MODEL to match the model loaded in LM Studio
+    model: str = "llama-3.2-3b-instruct"  # override via LLM_MODEL if a different model is loaded in LM Studio
     timeout_s: float = 60.0             # local inference (esp. on CPU) can genuinely take tens of seconds
     max_tokens: int = 400
 
