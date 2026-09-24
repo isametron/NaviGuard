@@ -1,23 +1,27 @@
 """Tests for the FastAPI service.
 
 Hermetic by design: get_artifacts is overridden via FastAPI's
-dependency_overrides with fake model/scaler stubs, and the LLM report/
-severity functions are monkeypatched at their call site — no trained
-model, real telemetry files, or running LM Studio are required.
+dependency_overrides with fake model/scaler stubs, telemetry paths are
+monkeypatched to a tiny generated CSV, and the LLM functions are
+monkeypatched at their call site — no trained model, real telemetry files,
+or running LM Studio are required.
 """
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from naviguard.api.main import app
+from naviguard.api.main import create_app
+from naviguard.data.generate import generate_dataset
 from naviguard.inference.artifacts import Artifacts, get_artifacts
 from naviguard.llm.client import LMStudioUnavailableError
 
 HORIZON = 3
 SEQ_LEN = 5
-N_FEATURES = 3
+N_SAMPLES = 200
 FEATURES = ["clock_bias_s", "clock_drift_s_per_s", "ephemeris_error_m"]
+# 200 rows: train_end=140, val_end=170 -> test windows i in [170, 200-3] => 28
+EXPECTED_TEST_WINDOWS = 28
 
 
 class FakeModel:
@@ -29,21 +33,18 @@ class FakeModel:
 
 
 @pytest.fixture
-def fake_artifacts(monkeypatch, tmp_path, fake_scaler):
-    n_samples = 10
-    X = np.zeros((n_samples, SEQ_LEN, N_FEATURES), dtype="float32")
-    y = np.zeros((n_samples, HORIZON), dtype="float32")
-    x_path = tmp_path / "X_seq.npy"
-    y_path = tmp_path / "y_seq.npy"
-    np.save(x_path, X)
-    np.save(y_path, y)
+def telemetry(monkeypatch, tmp_path):
+    csv = tmp_path / "telemetry.csv"
+    generate_dataset(n_samples=N_SAMPLES, out_path=str(csv))
+    for target in ("naviguard.inference.predict.TELEMETRY_CSV",
+                   "naviguard.api.routes.telemetry.TELEMETRY_CSV",
+                   "naviguard.api.routes.health.TELEMETRY_CSV"):
+        monkeypatch.setattr(target, str(csv))
+    return csv
 
-    # evaluate_on_test() loads sequences from these module-level path
-    # constants directly; monkeypatching them here keeps the test hermetic
-    # instead of depending on real generated artifacts.
-    monkeypatch.setattr("naviguard.inference.predict.X_SEQ_PATH", str(x_path))
-    monkeypatch.setattr("naviguard.inference.predict.Y_SEQ_PATH", str(y_path))
 
+@pytest.fixture
+def fake_artifacts(telemetry, fake_scaler):
     return Artifacts(
         model=FakeModel(),
         scaler=fake_scaler,
@@ -53,57 +54,77 @@ def fake_artifacts(monkeypatch, tmp_path, fake_scaler):
 
 @pytest.fixture
 def client(fake_artifacts):
+    app = create_app()
     app.dependency_overrides[get_artifacts] = lambda: fake_artifacts
     with TestClient(app) as c:
         yield c
-    app.dependency_overrides.clear()
 
 
+# ── health / model info / telemetry ──────────────────────────────────────────
 def test_health_always_200():
-    with TestClient(app) as c:
+    with TestClient(create_app()) as c:
         resp = c.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert isinstance(body["model_loaded"], bool)
+    assert body["llm_reachable"] is None            # not probed by default
 
 
-def test_telemetry_returns_latest_rows(monkeypatch, tmp_path):
-    import pandas as pd
+def test_health_check_llm_probes_server(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:1/v1")   # nothing listens here
+    with TestClient(create_app()) as c:
+        body = c.get("/health?check_llm=true").json()
+    assert body["llm_reachable"] is False
 
-    csv_path = tmp_path / "telemetry.csv"
-    pd.DataFrame({
-        "sample_id": range(5),
-        "clock_bias_s": [0.1, 0.2, 0.3, 0.4, 0.5],
-        "clock_drift_s_per_s": [0.0] * 5,
-        "ephemeris_error_m": [0.0] * 5,
-    }).to_csv(csv_path, index=False)
-    monkeypatch.setattr("naviguard.api.routes.telemetry.TELEMETRY_CSV", str(csv_path))
 
-    with TestClient(app) as c:
+def test_telemetry_returns_latest_rows(telemetry):
+    with TestClient(create_app()) as c:
         resp = c.get("/telemetry?limit=2")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["n_rows"] == 5
+    assert body["n_rows"] == N_SAMPLES
     assert len(body["rows"]) == 2
-    assert body["rows"][-1]["clock_bias_s"] == 0.5
+    assert body["rows"][-1]["sample_id"] == N_SAMPLES - 1
+
+
+def test_telemetry_503_when_csv_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr("naviguard.api.routes.telemetry.TELEMETRY_CSV", str(tmp_path / "nope.csv"))
+    with TestClient(create_app()) as c:
+        resp = c.get("/telemetry")
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "telemetry_missing"
+
+
+def test_telemetry_satellite_filter(monkeypatch, tmp_path):
+    csv = tmp_path / "multi.csv"
+    generate_dataset(n_samples=30, n_satellites=2, out_path=str(csv))
+    monkeypatch.setattr("naviguard.api.routes.telemetry.TELEMETRY_CSV", str(csv))
+    with TestClient(create_app()) as c:
+        body = c.get("/telemetry?satellite_id=1&limit=1000").json()
+        assert body["n_rows"] == 30
+        assert {r["satellite_id"] for r in body["rows"]} == {1}
+        assert c.get("/telemetry?satellite_id=9").status_code == 404
 
 
 def test_model_info_503_when_untrained(monkeypatch, tmp_path):
     monkeypatch.setattr("naviguard.api.routes.health.META_PATH", str(tmp_path / "does_not_exist.json"))
-    with TestClient(app) as c:
+    with TestClient(create_app()) as c:
         resp = c.get("/model/info")
     assert resp.status_code == 503
     assert resp.json()["error"] == "model_not_trained"
 
 
+# ── predict ───────────────────────────────────────────────────────────────────
 def test_predict_evaluate_returns_expected_shape(client):
     resp = client.get("/predict/evaluate")
     assert resp.status_code == 200
     body = resp.json()
     assert body["horizon"] == HORIZON
-    assert body["n_test_samples"] == 2  # 10 samples, 80/20 chronological split -> 2 test
+    assert body["n_test_samples"] == EXPECTED_TEST_WINDOWS
     assert len(body["mae_ns"]) == HORIZON
+    assert set(body["baselines"]) == {"persistence", "linear_extrapolation", "ridge"}
+    assert "skill_vs_persistence" in body
 
 
 def test_predict_forecast_with_explicit_window(client):
@@ -115,21 +136,57 @@ def test_predict_forecast_with_explicit_window(client):
     assert len(body["predicted_clock_bias_ns"]) == HORIZON
 
 
+def test_predict_forecast_from_latest_telemetry(client):
+    resp = client.post("/predict", json={})
+    assert resp.status_code == 200
+    assert len(resp.json()["predicted_clock_bias_ns"]) == HORIZON
+
+
 def test_predict_forecast_rejects_wrong_window_shape(client):
     resp = client.post("/predict", json={"window": [[0.0, 0.0, 0.0]] * (SEQ_LEN + 1)})
     assert resp.status_code == 422  # malformed client input, not a server error
 
 
+def test_predict_forecast_rejects_nan_window(client):
+    # JSON has no NaN literal; a very large float overflows to inf after scaling checks only
+    # if non-finite, so exercise the guard through the function directly.
+    from naviguard.inference.predict import forecast
+    bad = [[float("nan"), 0.0, 0.0]] * SEQ_LEN
+    with pytest.raises(ValueError, match="NaN"):
+        forecast(window=bad, artifacts=Artifacts(FakeModel(), None, {"seq_len": SEQ_LEN, "horizon": HORIZON}))
+
+
+def test_predict_unknown_satellite_is_422(client):
+    resp = client.post("/predict", json={"satellite_id": 42})
+    assert resp.status_code == 422
+
+
+# ── anomaly report ────────────────────────────────────────────────────────────
 def test_anomaly_report_without_llm(client):
     resp = client.post("/anomaly-report", json={"include_llm": False})
     assert resp.status_code == 200
     body = resp.json()
     assert body["llm_report"] is None
     assert body["llm_status"] == "not requested"
+    det = body["detection"]
+    assert det["severity"] in {"nominal", "watch", "anomalous"}
+    assert det["n_scored"] == EXPECTED_TEST_WINDOWS
+
+
+def test_anomaly_report_z_threshold_override(client):
+    strict = client.post("/anomaly-report", json={"include_llm": False, "z_threshold": 0.1}).json()
+    loose = client.post("/anomaly-report", json={"include_llm": False, "z_threshold": 1e9}).json()
+    assert strict["detection"]["n_flagged"] >= loose["detection"]["n_flagged"] == 0
 
 
 def test_anomaly_report_with_llm_success(client, monkeypatch):
-    monkeypatch.setattr("naviguard.api.routes.anomaly.generate_operator_report", lambda stats: "All nominal.")
+    seen = {}
+
+    def fake_report(stats):
+        seen["detection"] = stats["detection"]
+        return "All nominal."
+
+    monkeypatch.setattr("naviguard.api.routes.anomaly.generate_operator_report", fake_report)
     monkeypatch.setattr(
         "naviguard.api.routes.anomaly.assess_anomaly_severity",
         lambda stats: {"severity": "nominal", "reasoning": "ok"},
@@ -141,6 +198,7 @@ def test_anomaly_report_with_llm_success(client, monkeypatch):
     assert body["llm_report"] == "All nominal."
     assert body["llm_severity"]["severity"] == "nominal"
     assert body["llm_status"] == "ok"
+    assert seen["detection"]["n_scored"] == EXPECTED_TEST_WINDOWS   # LLM is given the detector verdict
 
 
 def test_anomaly_report_with_llm_unavailable_degrades_gracefully(client, monkeypatch):
@@ -148,9 +206,33 @@ def test_anomaly_report_with_llm_unavailable_degrades_gracefully(client, monkeyp
         raise LMStudioUnavailableError("LM Studio not reachable at http://localhost:1234/v1.")
 
     monkeypatch.setattr("naviguard.api.routes.anomaly.generate_operator_report", raise_unavailable)
+    monkeypatch.setattr("naviguard.api.routes.anomaly.assess_anomaly_severity", raise_unavailable)
 
     resp = client.post("/anomaly-report", json={"include_llm": True})
     assert resp.status_code == 200
     body = resp.json()
     assert body["llm_report"] is None
     assert "not reachable" in body["llm_status"]
+    assert body["detection"] is not None            # numeric analysis survives
+
+
+# ── security / CORS ───────────────────────────────────────────────────────────
+def test_api_key_required_when_configured(client, monkeypatch):
+    monkeypatch.setenv("NAVIGUARD_API_KEY", "s3cret")
+    assert client.get("/health").status_code == 200                       # always open
+    assert client.get("/predict/evaluate").status_code == 401
+    assert client.get("/predict/evaluate", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.get("/predict/evaluate", headers={"X-API-Key": "s3cret"}).status_code == 200
+    assert client.get("/model/info").status_code == 401
+
+
+def test_api_open_when_no_key_configured(client, monkeypatch):
+    monkeypatch.delenv("NAVIGUARD_API_KEY", raising=False)
+    assert client.get("/predict/evaluate").status_code == 200
+
+
+def test_cors_allows_configured_origin(client):
+    resp = client.get("/health", headers={"Origin": "http://localhost:5173"})
+    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+    resp = client.get("/health", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in resp.headers

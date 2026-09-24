@@ -17,6 +17,7 @@ venv/
 
 # Data, models, and outputs (generated)
 data/*.npy
+data/*.npz
 models/*.keras
 models/*.h5
 models/*.hdf5

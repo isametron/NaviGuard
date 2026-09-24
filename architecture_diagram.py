@@ -66,8 +66,8 @@ for (x1,y1,x2,y2,col,lbl) in arrows:
     arrow(x1,y1,x2,y2,col,lbl)
 
 details = [
-    (1.5,  3.1, '#e3f8fc', '#00bcd4', 'clock_bias_s\nclock_drift_s/s\nephemeris_error_m', '3 Features | 200 rows'),
-    (4.5,  3.1, '#f1f8e9', '#4caf50', 'MinMaxScaler\nWindow=20  Split=80/20\nSaves: X_seq.npy  y_seq.npy', 'sklearn'),
+    (1.5,  3.1, '#e3f8fc', '#00bcd4', 'clock_bias_s\nclock_drift_s/s\nephemeris_error_m', '3 Features | 2000 rows'),
+    (4.5,  3.1, '#f1f8e9', '#4caf50', 'MinMaxScaler\nWindow=20  Split=70/15/15\nSaves: sequences.npz  scaler.pkl', 'sklearn'),
     (7.8,  3.1, '#f3e5f5', '#9c27b0', 'LSTM(64) Dropout(0.2)\nLSTM(32) Dropout(0.2)\nDense(16)->Dense(1)', 'TensorFlow / Keras'),
     (11.0, 3.1, '#ffebee', '#f44336', 'Inverse Transform\nActual vs Predicted\nResidual Chart', 'matplotlib'),
     (14.0, 3.1, '#fff8e1', '#ff9800', 'Sidebar Controls\nTime-series Plots\nPrediction Image', 'streamlit'),
@@ -78,7 +78,7 @@ for (cx, cy, face, edge, title, sub) in details:
 
 files = [
     (1.5,  1.72, 'satellite_telemetry.csv', '#00bcd4'),
-    (4.5,  1.72, 'preprocess.py',           '#4caf50'),
+    (4.5,  1.72, 'sequences.py',           '#4caf50'),
     (7.8,  1.72, 'train_lstm.py',           '#9c27b0'),
     (11.0, 1.72, 'predict.py',              '#f44336'),
     (14.0, 1.72, 'dashboard.py',            '#ff9800'),

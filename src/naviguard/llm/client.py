@@ -31,6 +31,14 @@ class LMStudioClient:
             max_retries=0,
         )
 
+    def is_reachable(self, timeout_s: float = 1.5) -> bool:
+        """Cheap liveness probe (lists models) — never raises."""
+        try:
+            self._client.with_options(timeout=timeout_s).models.list()
+            return True
+        except (APIConnectionError, APITimeoutError, APIError):
+            return False
+
     def chat(self, system: str, user: str) -> str:
         try:
             resp = self._client.chat.completions.create(

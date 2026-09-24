@@ -38,4 +38,18 @@ def format_stats_for_prompt(stats: dict) -> str:
         f"Per-step MAE (ns): {[round(v, 2) for v in mae]}",
         f"Test samples evaluated: {stats.get('n_test_samples')}",
     ]
+    persist = (stats.get("baselines") or {}).get("persistence", {}).get("mae_ns")
+    if persist:
+        lines.append(f"Naive persistence baseline, step 1 MAE: {persist[0]:.3f} ns")
+    skill = stats.get("skill_vs_persistence")
+    if skill is not None:
+        lines.append(f"Model skill vs persistence (step 1): {skill:+.1%}")
+    det = stats.get("detection")
+    if det:
+        lines += [
+            f"Residual anomaly detector: {det['n_flagged']} of {det['n_scored']} test windows flagged "
+            f"(|robust z| > {det['z_threshold']:g})",
+            f"Largest |robust z|: {det['max_abs_z']:.1f}",
+            f"Detector severity (deterministic): {det['severity']}",
+        ]
     return "\n".join(lines)

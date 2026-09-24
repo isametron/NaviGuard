@@ -24,7 +24,9 @@ NaviGuard/
 │   ├── data/generate.py            # configurable synthetic telemetry simulation
 │   ├── preprocessing/sequences.py  # scaling + sliding-window sequence construction
 │   ├── models/                     # attention-LSTM definition + training
-│   ├── inference/                  # evaluation, forecasting, plotting
+│   ├── baselines.py                # persistence / linear / ridge comparison forecasters
+│   ├── anomaly/detect.py           # residual-based robust-z anomaly detector
+│   ├── inference/                  # evaluation, forecasting, anomaly scan, plotting
 │   ├── llm/                        # LM Studio client + operator-report generation
 │   └── api/                        # FastAPI service (health, predict, anomaly-report)
 ├── scripts/run_pipeline.py         # convenience: generate -> preprocess -> train -> predict
@@ -56,9 +58,9 @@ uvicorn naviguard.api.main:app --reload
 Or run each stage manually via the `naviguard` CLI:
 ```bash
 naviguard generate                  # Step 0: (re)generate telemetry CSV
-naviguard preprocess                # Step 1: scale + build sequences (seq_len=20, horizon=6)
+naviguard preprocess                # Step 1: fit scaler (train rows only), split 70/15/15, build windows
 naviguard train                     # Step 2: train the attention-LSTM
-naviguard predict --save-plot       # Step 3: evaluate + save plot
+naviguard predict --save-plot       # Step 3: test-split eval vs baselines + anomaly scan + plot
 naviguard serve                     # Step 4: launch the FastAPI service
 naviguard clean                     # (optional) remove generated models/outputs/sequences
 ```
@@ -85,6 +87,7 @@ A TypeScript/React frontend consuming the same JSON endpoints is a possible late
 | 5      | AttentionPooling  | 32    | additive (Bahdanau-style) attention pool |
 | 6      | Dense             | 16    | activation='relu'                         |
 | 7      | Dense             | horizon (6) | Linear output, multi-step forecast  |
+| 8      | LastValueSkip     | —     | adds the window's last clock bias (predicts the change) |
 
 - **Optimizer:** Adam (lr=0.001, β₁=0.9, β₂=0.999)
 - **Loss:** Mean Squared Error (MSE)
@@ -104,7 +107,7 @@ forecasts `horizon` steps ahead (default 6 -> 1.5h at 15-min cadence) instead of
 | Input features   | clock_bias_s, clock_drift_s_per_s, ephemeris_error_m |
 | Sequence length  | 20 steps (5 hours of history)                       |
 | Forecast horizon | 6 steps (1.5 hours ahead), configurable              |
-| Train/Val split  | 80/20 (chronological, no shuffle)                    |
+| Train/Val/Test   | 70/15/15, chronological, per satellite. Test is never seen in training; windows straddling a split boundary are dropped |
 | Sampling rate    | 15 minutes (900 seconds)                             |
 | MAE target       | ≤ 50 nanoseconds on the test split, **step 1 only** — later horizon steps are expected to degrade |
 | Output unit      | Seconds → converted to nanoseconds                   |
@@ -117,13 +120,43 @@ Once trained, `naviguard serve` (or `uvicorn naviguard.api.main:app`) exposes:
 
 | Method | Path               | Description |
 |--------|--------------------|-------------|
-| GET    | `/health`          | Always 200 — reports whether a model/scaler are present |
-| GET    | `/model/info`       | Trained model metadata (503 if not trained yet) |
-| GET    | `/predict/evaluate` | Per-horizon-step MAE/RMSE + actual/predicted/residual series (JSON form of the old PNG) |
-| POST   | `/predict`          | Forecast `horizon` steps ahead from an optional raw telemetry window |
-| POST   | `/anomaly-report`   | Numeric evaluation + threshold check, optionally layered with a local-LLM narrative report and severity assessment |
+| GET    | `/health`          | Always 200 — model/scaler/telemetry present; `?check_llm=true` also probes LM Studio |
+| GET    | `/model/info`       | Trained model metadata incl. test MAE and hyperparameters (503 if not trained yet) |
+| GET    | `/telemetry`        | Latest raw rows; optional `satellite_id` filter (503 if CSV missing) |
+| GET    | `/predict/evaluate` | Test-split MAE/RMSE per step, actual/predicted/residual series, **baseline comparison** and `skill_vs_persistence` (cached) |
+| POST   | `/predict`          | Forecast `horizon` steps ahead from an optional raw window (or the latest rows of an optional `satellite_id`) |
+| POST   | `/anomaly-report`   | Numeric evaluation + MAE-threshold check + **residual anomaly detection** (deterministic `nominal/watch/anomalous`, optional `z_threshold`), optionally layered with a local-LLM report and severity second-opinion |
 
-Interactive docs: `http://127.0.0.1:8000/docs`.
+Interactive docs: `http://127.0.0.1:8000/docs`. Response changes since v0.2 are additive only.
+
+Service configuration (env): `NAVIGUARD_API_KEY` — if set, every endpoint except `/health` requires an
+`X-API-Key` header; `NAVIGUARD_CORS_ORIGINS` — JSON list of allowed browser origins (defaults to the
+local Streamlit/React/Vite dev ports). API-time evaluation rebuilds windows in memory from the telemetry
+CSV with the persisted scaler, so `data/sequences.npz` is only needed for training.
+
+---
+
+## Evaluation and Honest Baselines
+
+`naviguard predict` scores the untouched test split and compares against three classical forecasters —
+naive **persistence**, least-squares **linear extrapolation**, and **ridge regression** on the flattened
+window. The model predicts the *change* from the last observed bias (`LastValueSkip`), so it starts from
+persistence and cannot be much worse than it. Typical output on the default synthetic data
+(single satellite, 2000 samples, MAE in ns):
+
+| step | attention-LSTM | persistence | linear | ridge |
+|------|----------------|-------------|--------|-------|
+| 1    | 23.9           | 45.4        | 27.5   | 20.7  |
+| 6    | 73.5           | 243.0       | 116.8  | 34.2  |
+
+The LSTM clearly beats persistence and linear extrapolation but **does not beat ridge** — expected, since the
+synthetic signal is a sinusoid plus a random walk, which a linear model captures almost fully. The attention-LSTM
+should earn its keep on real, non-linear NavIC/GNSS clock behaviour; that is the next thing to test.
+
+**Anomaly detection.** Step-1 residuals on the (nominal) validation split are calibrated to a robust
+median/MAD baseline; test residuals with |z| > 4 are flagged. Inject labelled faults to exercise it:
+`naviguard pipeline --anomaly-count 6` (bias spikes, drift excursions, ephemeris jumps — test region only).
+On clean data the scan reports 0 flags.
 
 ---
 
@@ -166,11 +199,11 @@ NavIC/GNSS Source (synthetic)
        ↓  [naviguard generate]
 satellite_telemetry.csv
        ↓  [naviguard preprocess]
-X_seq.npy + y_seq.npy + scaler.pkl   (seq_len=20, horizon=6)
+sequences.npz (train/val/test windows) + scaler.pkl   (seq_len=20, horizon=6)
        ↓  [naviguard train]
 lstm_attention_satellite.keras + model_meta.json
        ↓  [naviguard predict]
-Per-step MAE/RMSE + prediction_plot.png
+Per-step MAE/RMSE vs baselines + anomaly scan + prediction_plot.png
        ↓  [FastAPI service]
 JSON endpoints  +  optional local-LLM anomaly report (LM Studio)
        ↓  [Streamlit dashboard]  (optional, HTTP-only)
@@ -182,7 +215,10 @@ JSON endpoints  +  optional local-LLM anomaly report (LM Studio)
 
 ```bash
 pytest -q
+ruff check src tests scripts
 ```
+
+CI (`.github/workflows/ci.yml`) runs both on every push and pull request.
 
 The suite is hermetic — it does not require a trained model, generated telemetry, or a running
 LM Studio server. API tests use dependency overrides and fake model/scaler stubs; LLM tests use
@@ -202,9 +238,9 @@ Key papers this work builds upon:
 
 ## Roadmap (not yet built)
 
-Real NavIC/RINEX/IGS data ingestion · classical baselines (ARIMA/SARIMA/Prophet) for comparison ·
+Real NavIC/RINEX/IGS data ingestion · ARIMA/SARIMA/Prophet baselines · per-satellite models ·
 AWS/PySpark ETL for large-scale ingestion · Supabase persistence for historical predictions ·
-Docker + CI · a richer TypeScript/React frontend consuming the same API.
+Docker · a richer TypeScript/React frontend consuming the same API.
 
 ---
 

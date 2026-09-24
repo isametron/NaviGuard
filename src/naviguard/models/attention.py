@@ -20,6 +20,12 @@ class AttentionPooling(tf.keras.layers.Layer):
         self.score_dense = tf.keras.layers.Dense(units, activation="tanh")
         self.score_out = tf.keras.layers.Dense(1)
 
+    def build(self, input_shape):
+        input_shape = tuple(input_shape)
+        self.score_dense.build(input_shape)
+        self.score_out.build(input_shape[:-1] + (self.units,))
+        super().build(input_shape)
+
     def call(self, h):
         # h: (batch, timesteps, features)
         scores = self.score_out(self.score_dense(h))       # (batch, timesteps, 1)
@@ -30,4 +36,30 @@ class AttentionPooling(tf.keras.layers.Layer):
     def get_config(self):
         config = super().get_config()
         config.update({"units": self.units})
+        return config
+
+
+@tf.keras.utils.register_keras_serializable(package="naviguard")
+class LastValueSkip(tf.keras.layers.Layer):
+    """Adds the window's last observed target value to every predicted step.
+
+    The network then only learns the *change* from the last observation
+    (a persistence forecast is the starting point), which makes it robust to
+    slow level wander that pushes test values outside the training range.
+    """
+
+    def __init__(self, target_idx: int, **kwargs):
+        super().__init__(**kwargs)
+        self.target_idx = target_idx
+
+    def call(self, inputs):
+        delta, window = inputs                      # (batch, horizon), (batch, timesteps, features)
+        return delta + window[:, -1, self.target_idx][:, None]
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0]
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"target_idx": self.target_idx})
         return config
