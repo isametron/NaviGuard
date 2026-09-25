@@ -13,6 +13,7 @@ class TelemetryResponse(BaseModel):
     n_rows: int
     columns: list[str]
     rows: list[dict]
+    satellites: Optional[list[int]] = None     # all satellite ids present in the data (ignores the filter)
 
 
 class HealthResponse(BaseModel):
@@ -22,6 +23,7 @@ class HealthResponse(BaseModel):
     llm_configured: bool
     telemetry_available: Optional[bool] = None
     llm_reachable: Optional[bool] = None   # only probed with ?check_llm=true
+    profile: Optional[str] = None          # "synthetic" or "navic"
 
 
 class ModelInfoResponse(BaseModel):
@@ -38,6 +40,10 @@ class ModelInfoResponse(BaseModel):
     test_mae_ns: Optional[list[float]] = None
     persistence_mae_ns: Optional[list[float]] = None
     hparams: Optional[dict] = None
+    profile: Optional[str] = None               # "navic" for the real-data model
+    step_s: Optional[float] = None              # median record cadence (navic)
+    satellites: Optional[list[int]] = None      # satellites the model was trained on (navic)
+    candidates: Optional[dict] = None           # validation/test MAE of every candidate model (navic)
 
 
 class BaselineMetrics(BaseModel):
@@ -87,6 +93,7 @@ class AnomalyDetection(BaseModel):
 class AnomalyReportRequest(BaseModel):
     include_llm: bool = True
     z_threshold: Optional[float] = None
+    satellite_id: Optional[int] = None      # navic profile: score one satellite instead of all pooled
 
 
 class AnomalyReportResponse(BaseModel):

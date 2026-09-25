@@ -1,8 +1,9 @@
 """naviguard.api.routes.predict — evaluation and forecasting endpoints."""
 
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from naviguard.api.schemas import EvaluateResponse, PredictRequest, PredictResponse
 from naviguard.inference.artifacts import Artifacts, get_artifacts
@@ -12,11 +13,17 @@ router = APIRouter()
 
 
 @router.get("/predict/evaluate", response_model=EvaluateResponse)
-def predict_evaluate(artifacts: Artifacts = Depends(get_artifacts)) -> EvaluateResponse:
+def predict_evaluate(
+    satellite_id: Optional[int] = Query(None, description="navic profile only: evaluate one satellite"),
+    artifacts: Artifacts = Depends(get_artifacts),
+) -> EvaluateResponse:
     """Per-horizon-step MAE/RMSE on the untouched test split, the raw
     actual/predicted/residual series (nanoseconds), and classical-baseline
     comparison. Results are cached, so repeat calls are cheap."""
-    return EvaluateResponse(**evaluate_on_test(artifacts))
+    try:
+        return EvaluateResponse(**evaluate_on_test(artifacts, satellite_id))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.post("/predict", response_model=PredictResponse)

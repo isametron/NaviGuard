@@ -78,6 +78,78 @@ def _cmd_predict(args):
     print("[predict] ✓ Complete")
 
 
+def _cmd_fetch(args):
+    from datetime import date, timedelta
+
+    from naviguard.data.broadcast import fetch_range, to_telemetry
+
+    end = date.fromisoformat(args.end) if args.end else date.today() - timedelta(days=2)
+    start = date.fromisoformat(args.start) if args.start else end - timedelta(days=args.days - 1)
+    records, failed = fetch_range(start, end, keep_raw=args.keep_raw, force=args.force)
+    tel = to_telemetry(records, min_records=args.min_records)
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    tel.to_csv(args.out, index=False)
+    print(f"[fetch] {start} → {end}: {len(records)} IRNSS records, {len(failed)} day(s) failed")
+    for sat, g in tel.groupby("satellite_id"):
+        print(f"[fetch]   I{sat:02d}: {len(g)} samples")
+    print(f"[fetch] Saved: {args.out}")
+    print("[fetch] ✓ Complete")
+
+
+def _cmd_benchmark(args):
+    from naviguard.benchmark.models import ALL_MODELS
+    from naviguard.benchmark.run import run_benchmark, run_pooled_benchmark
+
+    if args.pooled:
+        pooled_models = tuple(args.models.split(",")) if args.models else ("ridge", "arima_p10", "lstm", "gru", "attn_lstm")
+        run_pooled_benchmark(
+            csv_path=args.csv, out_dir=args.out_dir, models=pooled_models, seq_len=args.seq_len,
+            horizon=args.horizon, n_folds=args.folds, seeds=args.seeds,
+            min_windows=args.min_windows, epochs=args.epochs, resume=args.resume,
+        )
+        print(f"[benchmark] Pooled rows merged into {args.out_dir}/results.csv (models suffixed _pooled)")
+        return
+    models = tuple(args.models.split(",")) if args.models else ALL_MODELS
+    run_benchmark(
+        csv_path=args.csv, out_dir=args.out_dir,
+        satellites=[int(s) for s in args.satellites.split(",")] if args.satellites else None,
+        models=models, seq_len=args.seq_len, horizon=args.horizon, n_folds=args.folds,
+        seeds=args.seeds, min_windows=args.min_windows, epochs=args.epochs, resume=args.resume,
+    )
+    print(f"[benchmark] Results in {args.out_dir}  (results.csv, summary.md, summary.tex, dm_tests.csv)")
+    print("[benchmark] ✓ Complete")
+
+
+def _cmd_anomaly_eval(args):
+    from naviguard.benchmark.anomaly_eval import run_anomaly_eval
+
+    run_anomaly_eval(args.csv, args.out_dir, seq_len=args.seq_len, n_events=args.events, trials=args.trials)
+    print(f"[anomaly] Summary: {args.out_dir}/summary.md")
+    print("[anomaly] ✓ Complete")
+
+
+def _cmd_train_navic(args):
+    from naviguard.inference.navic import train_navic
+
+    meta = train_navic(csv_path=args.csv, seq_len=args.seq_len, horizon=args.horizon, epochs=args.epochs,
+                       seed=args.seed)
+    print(f"[train-navic] Serve it with:  NAVIGUARD_PROFILE=navic naviguard serve   (model: {meta['hparams']['kind']})")
+    print("[train-navic] ✓ Complete")
+
+
+def _cmd_report(args):
+    from naviguard.benchmark.figures import build_report
+
+    bench = {}
+    for spec in args.bench:
+        label, _, path = spec.partition("=")
+        bench[label] = path
+    made = build_report(bench, args.anomaly_dir, args.csv, args.out_dir)
+    for p in made:
+        print(f"[report] {p}")
+    print("[report] ✓ Complete")
+
+
 def _cmd_serve(args):
     import uvicorn
     uvicorn.run("naviguard.api.main:app", host=args.host, port=args.port, reload=args.reload)
@@ -157,6 +229,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--split", choices=["val", "test"], default="test")
     p_pred.add_argument("--save-plot", action="store_true", dest="save_plot")
     p_pred.set_defaults(func=_cmd_predict)
+
+    p_fetch = sub.add_parser("fetch", help="Download real NavIC broadcast clock data (BRDM, per satellite)")
+    p_fetch.add_argument("--start", type=str, default=None, help="YYYY-MM-DD (default: end - days + 1)")
+    p_fetch.add_argument("--end", type=str, default=None, help="YYYY-MM-DD (default: 2 days ago)")
+    p_fetch.add_argument("--days", type=int, default=7)
+    p_fetch.add_argument("--min-records", type=int, default=48, dest="min_records",
+                         help="drop satellites with fewer records (sparsely tracked)")
+    p_fetch.add_argument("--out", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
+    p_fetch.add_argument("--keep-raw", action="store_true", dest="keep_raw")
+    p_fetch.add_argument("--force", action="store_true")
+    p_fetch.set_defaults(func=_cmd_fetch)
+
+    p_bench = sub.add_parser("benchmark", help="Rolling-origin benchmark of forecasters on real NavIC series")
+    p_bench.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
+    p_bench.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "benchmark"), dest="out_dir")
+    p_bench.add_argument("--satellites", type=str, default=None, help="comma-separated PRNs (default: all)")
+    p_bench.add_argument("--models", type=str, default=None, help="comma-separated (default: all)")
+    p_bench.add_argument("--seq-len", type=int, default=cfg.SEQ_LEN, dest="seq_len")
+    p_bench.add_argument("--horizon", type=int, default=cfg.HORIZON)
+    p_bench.add_argument("--folds", type=int, default=3)
+    p_bench.add_argument("--seeds", type=int, default=3)
+    p_bench.add_argument("--min-windows", type=int, default=200, dest="min_windows")
+    p_bench.add_argument("--epochs", type=int, default=60)
+    p_bench.add_argument("--resume", action="store_true", help="skip satellites already finished in --out-dir")
+    p_bench.add_argument("--pooled", action="store_true",
+                         help="train one model on all satellites (merged into an existing --out-dir)")
+    p_bench.set_defaults(func=_cmd_benchmark)
+
+    p_anom = sub.add_parser("anomaly-eval", help="Evaluate anomaly detectors on real series (injected + real events)")
+    p_anom.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
+    p_anom.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "anomaly"), dest="out_dir")
+    p_anom.add_argument("--seq-len", type=int, default=cfg.SEQ_LEN, dest="seq_len")
+    p_anom.add_argument("--events", type=int, default=8, help="faults injected per trial")
+    p_anom.add_argument("--trials", type=int, default=5)
+    p_anom.set_defaults(func=_cmd_anomaly_eval)
+
+    p_tn = sub.add_parser("train-navic", help="Train + select a model on real NavIC data (navic profile)")
+    p_tn.add_argument("--csv", type=str, default=cfg.NAVIC_TELEMETRY_CSV)
+    p_tn.add_argument("--seq-len", type=int, default=cfg.SEQ_LEN, dest="seq_len")
+    p_tn.add_argument("--horizon", type=int, default=cfg.HORIZON)
+    p_tn.add_argument("--epochs", type=int, default=40)
+    p_tn.add_argument("--seed", type=int, default=0)
+    p_tn.set_defaults(func=_cmd_train_navic)
+
+    p_rep = sub.add_parser("report", help="Build paper figures/LaTeX tables from benchmark + anomaly outputs")
+    p_rep.add_argument("--bench", action="append", default=[],
+                       help="LABEL=DIR of a benchmark output (repeatable), e.g. 'horizon 6=outputs/benchmark_h6'")
+    p_rep.add_argument("--anomaly-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "anomaly"), dest="anomaly_dir")
+    p_rep.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
+    p_rep.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "figures"), dest="out_dir")
+    p_rep.set_defaults(func=_cmd_report)
 
     p_serve = sub.add_parser("serve", help="Run the FastAPI service")
     p_serve.add_argument("--host", type=str, default="127.0.0.1")

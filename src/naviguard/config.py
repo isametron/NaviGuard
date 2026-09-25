@@ -21,6 +21,19 @@ MODEL_PATH    = os.path.join(MODELS_DIR, "lstm_attention_satellite.keras")
 META_PATH     = os.path.join(MODELS_DIR, "model_meta.json")
 PLOT_PATH     = os.path.join(OUTPUTS_DIR, "prediction_plot.png")
 
+# Real-data ("navic") profile: level-free windows over real NavIC broadcast clocks (see inference/navic.py).
+PROFILE_ENV        = "NAVIGUARD_PROFILE"          # "synthetic" (default) or "navic"
+NAVIC_TELEMETRY_CSV = os.path.join(DATA_DIR, "navic_telemetry.csv")
+NAVIC_DIR          = os.path.join(MODELS_DIR, "navic")
+NAVIC_MODEL_PATH   = os.path.join(NAVIC_DIR, "model.keras")
+NAVIC_FORECASTER_PATH = os.path.join(NAVIC_DIR, "forecaster.pkl")
+NAVIC_META_PATH    = os.path.join(NAVIC_DIR, "model_meta.json")
+
+
+def active_profile() -> str:
+    """Which data profile the service runs: "synthetic" (default) or "navic"."""
+    return os.environ.get(PROFILE_ENV, "synthetic").strip().lower() or "synthetic"
+
 # ── Data / model constants ────────────────────────────────────────────────────
 FEATURES   = ["clock_bias_s", "clock_drift_s_per_s", "ephemeris_error_m"]
 TARGET_COL = "clock_bias_s"

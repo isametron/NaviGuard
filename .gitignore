@@ -36,3 +36,10 @@ Thumbs.db
 # IDE settings
 .vscode/
 .idea/
+
+# Downloaded broadcast data + real-data telemetry
+data/raw/
+data/navic_telemetry.csv
+
+# Real-data (navic) model artifacts
+models/navic/

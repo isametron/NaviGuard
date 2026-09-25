@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from naviguard.api.schemas import AnomalyReportRequest, AnomalyReportResponse, EvaluateResponse
 from naviguard.inference.artifacts import Artifacts, get_artifacts
@@ -23,8 +23,11 @@ def anomaly_report(
     layers a local-LLM narrative report + severity second-opinion on top.
     Always returns 200: if LM Studio isn't running, the numeric result is
     still returned with llm_report=None and an explanatory llm_status."""
-    result = evaluate_on_test(artifacts)
-    detection = detect_anomalies(artifacts, req.z_threshold)
+    try:
+        result = evaluate_on_test(artifacts, req.satellite_id)
+        detection = detect_anomalies(artifacts, req.z_threshold, req.satellite_id)
+    except ValueError as e:                      # e.g. unknown satellite_id
+        raise HTTPException(status_code=422, detail=str(e)) from e
     threshold_breach = not result["pass_step1"]
 
     llm_report = None

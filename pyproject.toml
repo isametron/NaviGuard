@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "naviguard"
 version = "0.3.0"
-description = "AI-driven NavIC/GNSS satellite clock bias & ephemeris error intelligence"
+description = "Clock-bias forecasting and anomaly monitoring for NavIC satellites, benchmarked on real broadcast clock data"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.1",

@@ -13,7 +13,7 @@ from typing import Optional
 import joblib
 import tensorflow as tf
 
-from naviguard.config import MODEL_PATH, SCALER_PATH, META_PATH
+from naviguard.config import META_PATH, MODEL_PATH, NAVIC_META_PATH, SCALER_PATH, active_profile
 from naviguard.errors import ArtifactsInvalidError
 from naviguard.models.attention import AttentionPooling, LastValueSkip
 
@@ -35,12 +35,15 @@ _lock = threading.Lock()
 
 
 def artifacts_exist() -> bool:
+    if active_profile() == "navic":
+        return os.path.exists(NAVIC_META_PATH)
     return os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH)
 
 
 def _signature() -> tuple:
-    return tuple(os.path.getmtime(p) if os.path.exists(p) else None
-                 for p in (MODEL_PATH, SCALER_PATH, META_PATH))
+    paths = (NAVIC_META_PATH,) if active_profile() == "navic" else (MODEL_PATH, SCALER_PATH, META_PATH)
+    return (active_profile(),) + tuple(os.path.getmtime(p) if os.path.exists(p) else None
+                                       for p in paths)
 
 
 def _validate(model, meta: dict) -> None:
@@ -65,6 +68,11 @@ def get_artifacts(force_reload: bool = False) -> Artifacts:
     with _lock:
         key = _signature()
         if _cache is not None and not force_reload and key == _cache_key:
+            return _cache
+
+        if active_profile() == "navic":
+            from naviguard.inference.navic import load_navic          # lazy: navic imports this module
+            _cache, _cache_key = load_navic(), key
             return _cache
 
         missing = [p for p in (MODEL_PATH, SCALER_PATH) if not os.path.exists(p)]

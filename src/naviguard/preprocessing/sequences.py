@@ -43,13 +43,13 @@ class SequenceSet:
         return int((self.split == SPLIT_IDS[name]).sum())
 
 
-def load_telemetry(path: str = TELEMETRY_CSV) -> pd.DataFrame:
+def load_telemetry(path: str = TELEMETRY_CSV, required: list[str] | None = None) -> pd.DataFrame:
     if not os.path.exists(path):
         raise TelemetryNotFoundError(
             f"Telemetry CSV not found: {path}. Run `naviguard generate` first."
         )
     df = pd.read_csv(path)
-    missing = [c for c in FEATURES if c not in df.columns]
+    missing = [c for c in (FEATURES if required is None else required) if c not in df.columns]
     if missing:
         raise ValueError(f"Telemetry CSV {path} is missing columns: {missing}")
     return df

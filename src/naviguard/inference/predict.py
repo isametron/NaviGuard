@@ -19,6 +19,7 @@ from naviguard.config import (
     ANOMALY_Z_THRESHOLD, FEATURES, HORIZON, MAE_TARGET_NS, N_FEATURES, PLOT_PATH,
     SEQ_LEN, TARGET_IDX, TELEMETRY_CSV,
 )
+from naviguard.inference import navic
 from naviguard.inference.artifacts import Artifacts, get_artifacts
 from naviguard.preprocessing.sequences import (
     SequenceSet, build_sequences, load_telemetry, satellite_frames,
@@ -109,12 +110,15 @@ def _baseline_metrics(artifacts: Artifacts, seqs: SequenceSet, split: str) -> di
     return out
 
 
-def evaluate_split(artifacts: Artifacts | None = None, split: str = "test") -> dict:
+def evaluate_split(artifacts: Artifacts | None = None, split: str = "test",
+                   satellite_id: int | None = None) -> dict:
     """Evaluate on a held-out split (default: the untouched test split) and
     compare against classical baselines (persistence, linear extrapolation,
     ridge). `skill_vs_persistence` is 1 - MAE_model/MAE_persistence at step 1
     (>0 means the model beats naive persistence)."""
     artifacts = artifacts or get_artifacts()
+    if navic.is_navic(artifacts):
+        return navic.evaluate_navic(artifacts, split, satellite_id)
     seqs = _get_sequences(artifacts)
     key = (id(artifacts), split, id(seqs))
     with _lock:
@@ -137,14 +141,17 @@ def evaluate_split(artifacts: Artifacts | None = None, split: str = "test") -> d
     return result
 
 
-def evaluate_on_test(artifacts: Artifacts | None = None) -> dict:
-    return evaluate_split(artifacts, "test")
+def evaluate_on_test(artifacts: Artifacts | None = None, satellite_id: int | None = None) -> dict:
+    return evaluate_split(artifacts, "test", satellite_id)
 
 
-def detect_anomalies(artifacts: Artifacts | None = None, z_threshold: float | None = None) -> dict:
+def detect_anomalies(artifacts: Artifacts | None = None, z_threshold: float | None = None,
+                     satellite_id: int | None = None) -> dict:
     """Flag test-split windows whose step-1 residual is an outlier relative to
     the (nominal) validation-split residuals. Returns the detector summary."""
     artifacts = artifacts or get_artifacts()
+    if navic.is_navic(artifacts):
+        return navic.detect_navic(artifacts, z_threshold, satellite_id)
     seqs = _get_sequences(artifacts)
     key = (id(artifacts), "val_calibration", id(seqs))
     with _lock:
@@ -187,6 +194,8 @@ def forecast(
     (for `satellite_id`, default the first satellite). Raises ValueError on
     malformed input."""
     artifacts = artifacts or get_artifacts()
+    if navic.is_navic(artifacts):
+        return navic.forecast_navic(window, artifacts, satellite_id)
     model, scaler = artifacts.model, artifacts.scaler
     seq_len = artifacts.meta.get("seq_len", SEQ_LEN)
 

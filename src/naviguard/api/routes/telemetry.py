@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from naviguard.api.schemas import TelemetryResponse
-from naviguard.config import TELEMETRY_CSV
+from naviguard.config import NAVIC_TELEMETRY_CSV, TELEMETRY_CSV, active_profile
 from naviguard.preprocessing.sequences import load_telemetry
 
 router = APIRouter()
@@ -18,7 +18,10 @@ def get_telemetry(
 ) -> TelemetryResponse:
     """Latest `limit` rows of raw telemetry, for frontends that want to chart
     or table the source data without reading data/*.csv directly."""
-    df = load_telemetry(TELEMETRY_CSV)   # raises TelemetryNotFoundError -> 503
+    navic = active_profile() == "navic"
+    # raises TelemetryNotFoundError -> 503; the navic profile has no ephemeris_error_m column
+    df = load_telemetry(NAVIC_TELEMETRY_CSV, required=["clock_bias_s"]) if navic else load_telemetry(TELEMETRY_CSV)
+    all_sats = sorted(int(s) for s in df["satellite_id"].unique()) if "satellite_id" in df.columns else None
     if satellite_id is not None:
         if "satellite_id" not in df.columns:
             raise HTTPException(status_code=422, detail="telemetry has no satellite_id column")
@@ -30,4 +33,5 @@ def get_telemetry(
         n_rows=len(df),
         columns=list(tail.columns),
         rows=tail.to_dict(orient="records"),
+        satellites=all_sats,
     )
