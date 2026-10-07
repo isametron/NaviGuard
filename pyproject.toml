@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.1",
     "pandas>=2.2",
+    "jinja2>=3.1",           # pandas DataFrame.to_latex() requires it (used in benchmark/run.py, figures.py)
     "scikit-learn>=1.5",
     "tensorflow>=2.17",
     "matplotlib>=3.9",
