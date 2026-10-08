@@ -296,10 +296,23 @@ Clock-bias prediction with recurrent networks is an active area (verify details 
 
 ## Roadmap
 
-In progress: cross-satellite pooled models and the 24 h (96-step) horizon. Next: separating natural
-refit discontinuities from true faults; precise clocks for GPS/Galileo/BeiDou (IGS `.CLK`) as an
-external validation set; probabilistic (conformal) forecasts; scheduled data refresh and retraining;
-Docker.
+Done: cross-satellite pooled models, the 24 h (96-step) horizon, and per-satellite coverage reports.
+
+In progress: six-month dataset (Apr–Sep 2026).
+
+Next:
+
+- Separating natural refit discontinuities from true faults (change-point detection before residual scoring).
+- Block-bootstrap confidence intervals for model comparisons.
+- Kalman-filter clock baseline and hyperparameter tuning of the neural models.
+- Probabilistic (quantile or conformal) forecasts.
+- Precise clocks for GPS/Galileo/BeiDou (IGS `.CLK`) as an external validation set.
+- Allan deviation (frequency-stability) reporting alongside MAE, the standard metric in clock science.
+- Versioned dataset releases with a DOI (e.g. Zenodo), so results stay reproducible even if the source
+  archive changes.
+- A short guide to adding a new forecaster or detector, with config-driven experiments.
+- Lower-latency data sources (CDDIS sub-hourly IRNSS files, real-time streams, or a NavIC receiver),
+  scheduled data refresh and retraining; Docker.
 
 ---
 
