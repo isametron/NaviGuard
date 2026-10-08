@@ -720,8 +720,31 @@ if eval_status == 200:
                 unsafe_allow_html=True,
             )
             if det.get("z_scores"):
+                # Anomaly timeline: |z| per test window, threshold line, flagged windows highlighted.
                 z_abs = pd.Series([abs(z) for z in det["z_scores"]])
-                st.pyplot(pudding_plot(z_abs, "|robust z|", CARD_CREAM), width="stretch")
+                flagged = det.get("flagged_indices") or []
+                thr = det["z_threshold"]
+                fig, ax = plt.subplots(figsize=(11, 3.2), facecolor=CARD_CREAM)
+                ax.set_facecolor(CARD_CREAM)
+                ax.axhspan(0, thr, color=CARD_MINT, alpha=0.30, label="within threshold")
+                ax.plot(z_abs.values, color=INK, lw=1.6, solid_capstyle="round", label="|robust z|")
+                ax.axhline(thr, color="#c0392b", lw=1.4, ls="--", label=f"threshold ({thr:.1f})")
+                if flagged:
+                    ax.scatter(flagged, z_abs.values[flagged], color="#c0392b", s=22, zorder=3,
+                               label=f"flagged ({len(flagged)})")
+                ax.set_title(
+                    f"{det['severity']} · {det['n_flagged']} of {det['n_scored']} windows flagged",
+                    fontsize=9, color=INK, loc="left",
+                )
+                ax.set_xlabel("test window", fontsize=8, color=INK, alpha=0.45)
+                ax.set_ylabel("|robust z|", fontsize=8, color=INK, alpha=0.45)
+                ax.tick_params(colors=INK, labelsize=7, length=0)
+                ax.legend(fontsize=8, frameon=False, labelcolor=INK, loc="upper right")
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                ax.grid(alpha=0.12, linestyle="-", color=INK)
+                fig.tight_layout(pad=0.8)
+                st.pyplot(fig, width="stretch")
             if is_navic:
                 st.caption(
                     "broadcast-clock residuals are heavy-tailed (frequent natural refit discontinuities), so the "
@@ -757,6 +780,88 @@ if eval_status == 200:
         st.error(f"anomaly report fetch failed: {report_body}")
 else:
     st.caption("anomaly report needs a trained model first.")
+
+# ── Side-by-side satellite comparison ──────────────────────────────────────────
+# Calls the existing /telemetry and /predict/evaluate endpoints once per satellite
+# (no backend changes needed) and shows I02, I09 and I10 next to each other.
+if is_navic and len(satellites) > 1:
+    st.markdown("---")
+    st.markdown("### satellite comparison")
+
+    # Compare I02, I09, I10 when available; otherwise fall back to every satellite the API lists.
+    compare_ids = [s for s in (2, 9, 10) if s in satellites] or list(satellites)
+    compare_colors = [CARD_SKY, CARD_PINK, CARD_MINT, CARD_YELLOW]
+    line_colors = [INK, "#c0392b", "#2a7f62", "#b8860b"]
+
+    @st.cache_data(ttl=60, show_spinner=False)
+    def fetch_satellite(sat_id: int, limit: int):
+        """One satellite's telemetry + evaluation. Cached so reruns don't re-hit the API."""
+        t_status, t_body = api_get("/telemetry", limit=limit, satellite_id=sat_id)
+        e_status, e_body = api_get("/predict/evaluate", satellite_id=sat_id)
+        return t_status, t_body, e_status, e_body
+
+    results = {}
+    with st.spinner("loading satellites..."):
+        for sid in compare_ids:
+            results[sid] = fetch_satellite(int(sid), telemetry_limit)
+
+    # 1) Summary table: one row per satellite
+    summary_rows = []
+    for sid, (t_status, t_body, e_status, e_body) in results.items():
+        row = {"satellite": f"I{int(sid):02d}"}
+        row["samples"] = t_body.get("n_rows") if t_status == 200 else None
+        if e_status == 200:
+            row["mae step 1 (ns)"] = round(e_body["mae_ns"][0], 2)
+            row["mae last step (ns)"] = round(e_body["mae_ns"][-1], 2)
+            row["rmse step 1 (ns)"] = round(e_body["rmse_ns"][0], 2)
+            skill = e_body.get("skill_vs_persistence")
+            row["skill vs persistence"] = round(skill, 3) if skill is not None else None
+        else:
+            row["mae step 1 (ns)"] = row["mae last step (ns)"] = None
+            row["rmse step 1 (ns)"] = row["skill vs persistence"] = None
+        summary_rows.append(row)
+    st.dataframe(pd.DataFrame(summary_rows).set_index("satellite"), width="stretch")
+
+    # 2) Clock bias, one column per satellite
+    st.markdown("**clock bias (latest rows)**")
+    cols = st.columns(len(compare_ids))
+    for i, (col, sid) in enumerate(zip(cols, compare_ids)):
+        t_status, t_body, _, _ = results[sid]
+        with col:
+            st.caption(f"I{int(sid):02d}")
+            if t_status == 200 and t_body["rows"]:
+                sat_df = pd.DataFrame(t_body["rows"])
+                st.pyplot(
+                    pudding_plot(sat_df["clock_bias_s"] * 1e6, "μs", compare_colors[i % len(compare_colors)]),
+                    width="stretch",
+                )
+            else:
+                st.warning(f"no telemetry (status {t_status})")
+
+    # 3) Forecast error vs step, one line per satellite
+    st.markdown("**forecast error by step (test split)**")
+    fig, ax = plt.subplots(figsize=(11, 3.2), facecolor=CARD_CREAM)
+    ax.set_facecolor(CARD_CREAM)
+    plotted = False
+    for i, sid in enumerate(compare_ids):
+        _, _, e_status, e_body = results[sid]
+        if e_status == 200:
+            steps = range(1, len(e_body["mae_ns"]) + 1)
+            ax.plot(steps, e_body["mae_ns"], lw=2.0, marker="o", ms=3,
+                    color=line_colors[i % len(line_colors)], label=f"I{int(sid):02d}")
+            plotted = True
+    if plotted:
+        ax.set_xlabel("forecast step", fontsize=8, color=INK, alpha=0.45)
+        ax.set_ylabel("MAE (ns)", fontsize=8, color=INK, alpha=0.45)
+        ax.tick_params(colors=INK, labelsize=7, length=0)
+        ax.legend(fontsize=8, frameon=False, labelcolor=INK)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.grid(alpha=0.12, linestyle="-", color=INK)
+        fig.tight_layout(pad=0.8)
+        st.pyplot(fig, width="stretch")
+    else:
+        st.caption("evaluation unavailable for these satellites (is the model trained?)")
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 _footer_detail = (
