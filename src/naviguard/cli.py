@@ -85,15 +85,32 @@ def _cmd_fetch(args):
 
     end = date.fromisoformat(args.end) if args.end else date.today() - timedelta(days=2)
     start = date.fromisoformat(args.start) if args.start else end - timedelta(days=args.days - 1)
+    if start > end:
+        raise ValueError(f"fetch start date {start} must be on or before end date {end}")
     records, failed = fetch_range(start, end, keep_raw=args.keep_raw, force=args.force)
     tel = to_telemetry(records, min_records=args.min_records)
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     tel.to_csv(args.out, index=False)
     print(f"[fetch] {start} → {end}: {len(records)} IRNSS records, {len(failed)} day(s) failed")
     for sat, g in tel.groupby("satellite_id"):
         print(f"[fetch]   I{sat:02d}: {len(g)} samples")
     print(f"[fetch] Saved: {args.out}")
     print("[fetch] ✓ Complete")
+
+
+def _cmd_coverage(args):
+    from naviguard.benchmark.coverage import build_coverage_report
+
+    horizons = tuple(dict.fromkeys(int(value) for value in args.horizons.split(",")))
+    if not horizons or any(horizon <= 0 for horizon in horizons):
+        raise ValueError("--horizons must be a comma-separated list of positive integers")
+    csv_path, markdown_path = build_coverage_report(
+        args.csv, args.out_dir, horizons=horizons, seq_len=args.seq_len,
+        min_windows=args.min_windows,
+    )
+    print(f"[coverage] CSV report: {csv_path}")
+    print(f"[coverage] Summary   : {markdown_path}")
+    print("[coverage] ✓ Complete")
 
 
 def _cmd_benchmark(args):
@@ -240,6 +257,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--keep-raw", action="store_true", dest="keep_raw")
     p_fetch.add_argument("--force", action="store_true")
     p_fetch.set_defaults(func=_cmd_fetch)
+
+    p_cov = sub.add_parser("coverage", help="Report per-satellite sample coverage, gaps, and horizon eligibility")
+    p_cov.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry_6mo.csv"))
+    p_cov.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "coverage"), dest="out_dir")
+    p_cov.add_argument("--horizons", type=str, default="1,6,12,24",
+                       help="comma-separated forecast horizons in samples (default: 1,6,12,24)")
+    p_cov.add_argument("--seq-len", type=int, default=cfg.SEQ_LEN, dest="seq_len")
+    p_cov.add_argument("--min-windows", type=int, default=200, dest="min_windows",
+                       help="minimum gap-free windows required for a satellite to qualify")
+    p_cov.set_defaults(func=_cmd_coverage)
 
     p_bench = sub.add_parser("benchmark", help="Rolling-origin benchmark of forecasters on real NavIC series")
     p_bench.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))

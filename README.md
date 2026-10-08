@@ -1,4 +1,5 @@
 # NaviGuard: Clock-Bias Forecasting and Anomaly Monitoring for NavIC Satellites
+
 **Dept. of AI & DS, BMS College of Engineering | 2025–26**
 
 > A reproducible benchmark and monitoring service for **satellite clock-bias forecasting** and
@@ -31,25 +32,25 @@ folds; neural models are averaged over 3 seeds (± = seed std).
 **1. The satellite's own broadcast drift is a very strong baseline.** Averaged over satellites,
 1.5 h ahead (6 steps):
 
-| model | step 1 | step 3 | step 6 |
-|---|---|---|---|
-| persistence | 48.3 | 143.7 | 286.6 |
-| **broadcast drift (af1)** | **4.2** | **10.4** | **20.0** |
-| ARIMA(p,1,0) | 6.3 | 15.2 | 29.7 |
-| ridge | 6.7 | 13.2 | 23.5 |
-| LSTM | 11.1 ± 2.9 | 33.3 ± 5.3 | 58.3 ± 23.1 |
-| attention-LSTM | 10.3 ± 1.8 | 31.0 ± 16.9 | 67.8 ± 22.8 |
+| model                     | step 1     | step 3      | step 6      |
+| ------------------------- | ---------- | ----------- | ----------- |
+| persistence               | 48.3       | 143.7       | 286.6       |
+| **broadcast drift (af1)** | **4.2**    | **10.4**    | **20.0**    |
+| ARIMA(p,1,0)              | 6.3        | 15.2        | 29.7        |
+| ridge                     | 6.7        | 13.2        | 23.5        |
+| LSTM                      | 11.1 ± 2.9 | 33.3 ± 5.3  | 58.3 ± 23.1 |
+| attention-LSTM            | 10.3 ± 1.8 | 31.0 ± 16.9 | 67.8 ± 22.8 |
 
 **2. On the cleanest satellite, attention helps — and the benefit grows with horizon.** On I02 (long,
 gap-free series) the attention-LSTM is best at steps 1, 12 and 24 of the 6 h (24-step) horizon and the seed
 spread is tiny, while ridge/broadcast-drift are next:
 
-| I02, 24-step horizon | step 1 | step 12 | step 24 |
-|---|---|---|---|
-| broadcast drift | 2.72 | 20.10 | 35.29 |
-| ridge | 2.68 | 16.92 | 31.96 |
-| LSTM | 2.73 ± 0.01 | 18.85 ± 0.28 | 30.85 ± 3.04 |
-| **attention-LSTM** | **2.51 ± 0.06** | **15.70 ± 0.04** | **23.08 ± 0.22** |
+| I02, 24-step horizon | step 1          | step 12          | step 24          |
+| -------------------- | --------------- | ---------------- | ---------------- |
+| broadcast drift      | 2.72            | 20.10            | 35.29            |
+| ridge                | 2.68            | 16.92            | 31.96            |
+| LSTM                 | 2.73 ± 0.01     | 18.85 ± 0.28     | 30.85 ± 3.04     |
+| **attention-LSTM**   | **2.51 ± 0.06** | **15.70 ± 0.04** | **23.08 ± 0.22** |
 
 At the 1.5 h horizon the attention-LSTM and ridge are statistically indistinguishable on I02
 (Diebold–Mariano p ≈ 0.25).
@@ -59,7 +60,7 @@ learned models are roughly 2–4× worse than broadcast drift and vary a lot acr
 is not uniformly better than a plain LSTM. Any claim that learned models "win" is satellite-specific.
 
 **4. Broadcast-clock residuals are heavy-tailed.** One-step residuals have excess kurtosis of 80–96.
-Even in the *nominal* training period 3.8% (I02), 11.2% (I09) and 29.6% (I10) of samples exceed 4σ,
+Even in the _nominal_ training period 3.8% (I02), 11.2% (I09) and 29.6% (I10) of samples exceed 4σ,
 because ground-segment refits create frequent discontinuities. A Gaussian z-score threshold therefore
 produces many alerts. On injected faults the detectors reach ≥0.99 recall at ≥10σ, but precision is low
 (best F1 ≈ 0.25–0.35; ~35–50 alarms per 1000 clean held-out windows for the z-score/CUSUM detectors, ~3 for
@@ -72,6 +73,7 @@ the satellite average is dominated by the two hard satellites; NavIC coverage va
 appears only in January data).
 
 Reproduce everything:
+
 ```bash
 naviguard fetch --start 2026-07-15 --end 2026-09-21
 naviguard benchmark --seeds 3 --epochs 40 --folds 3 --horizon 6 --out-dir outputs/benchmark_h6
@@ -132,6 +134,7 @@ pip install -e ".[dev]"
 ```
 
 ### A. Real NavIC data (the main path)
+
 ```bash
 naviguard fetch --days 60              # download + extract per-satellite broadcast clocks (~1.4 MB/day, raw deleted)
 naviguard train-navic                  # trains 3 candidates, serves the lowest *validation* MAE
@@ -139,12 +142,14 @@ NAVIGUARD_PROFILE=navic naviguard serve        # PowerShell: $env:NAVIGUARD_PROF
 ```
 
 ### B. Synthetic demo (no downloads)
+
 ```bash
 python scripts/run_pipeline.py         # generate -> preprocess -> train -> predict
 naviguard serve
 ```
 
 Docs at `http://127.0.0.1:8000/docs`. Dashboard (optional):
+
 ```bash
 pip install -e ".[frontend]"
 streamlit run frontend/dashboard.py    # http://localhost:8501; set NAVIGUARD_API_URL if the API is elsewhere
@@ -152,21 +157,34 @@ streamlit run frontend/dashboard.py    # http://localhost:8501; set NAVIGUARD_AP
 
 ### CLI reference
 
-| command | purpose |
-|---|---|
-| `generate` | synthetic telemetry (`--n-satellites`, `--anomaly-count` injects labelled faults in the test region) |
-| `preprocess` / `train` / `predict` | synthetic-profile pipeline (70/15/15 split, val-based early stopping, baselines, anomaly scan) |
-| `pipeline` | generate → preprocess → train → predict |
-| `fetch` | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`) |
-| `train-navic` | train + select a model on real data for the `navic` profile |
-| `benchmark` | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`) |
-| `anomaly-eval` | detector evaluation: injected faults + real events vs metadata |
-| `report` | figures and LaTeX tables from benchmark/anomaly outputs |
-| `serve` / `clean` | run the API / remove generated artifacts |
+| command                            | purpose                                                                                                       |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `generate`                         | synthetic telemetry (`--n-satellites`, `--anomaly-count` injects labelled faults in the test region)          |
+| `preprocess` / `train` / `predict` | synthetic-profile pipeline (70/15/15 split, val-based early stopping, baselines, anomaly scan)                |
+| `pipeline`                         | generate → preprocess → train → predict                                                                       |
+| `fetch`                            | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`)             |
+| `coverage`                         | per-satellite sample/gap summary and gap-aware eligibility by forecast horizon                                |
+| `train-navic`                      | train + select a model on real data for the `navic` profile                                                   |
+| `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`) |
+| `anomaly-eval`                     | detector evaluation: injected faults + real events vs metadata                                                |
+| `report`                           | figures and LaTeX tables from benchmark/anomaly outputs                                                       |
+| `serve` / `clean`                  | run the API / remove generated artifacts                                                                      |
 
 ---
 
 ## Data
+
+### Six-month telemetry checklist
+
+- [ ] Fetch the inclusive date range into a dedicated CSV:
+      `naviguard fetch --start 2026-04-01 --end 2026-09-21 --out data/navic_telemetry_6mo.csv`
+- [ ] Generate the per-satellite coverage and gap report:
+      `naviguard coverage --csv data/navic_telemetry_6mo.csv --out-dir outputs/coverage`
+- [ ] Review `outputs/coverage/coverage.md` and the detailed `outputs/coverage/coverage.csv`.
+
+The coverage report counts a gap when the interval exceeds 1.5× the satellite's median cadence.
+Horizon qualification requires at least 200 complete gap-free windows, using the configured
+sequence length (default 20 samples) and the forecast horizons 1, 6, 12, and 24 samples.
 
 **Real (navic profile).** The daily multi-GNSS broadcast-ephemeris product `BRDM00DLR` (DLR/GSOC, RINEX
 3.04) mirrored by BKG's IGS archive (public, ~1.4 MB gzipped per day). Each IRNSS record carries a clock
@@ -185,7 +203,7 @@ targets are the change from that last value. Windows never span data gaps. This 
 comparable and enables cross-satellite pooling.
 
 **Evaluation protocol.** Chronological per satellite; windows are assigned to a split by where their
-*targets* lie and any straddling a boundary are dropped, so no training target overlaps validation/test.
+_targets_ lie and any straddling a boundary are dropped, so no training target overlaps validation/test.
 The scaler (synthetic profile) is fit on training rows only. Benchmarks use purged, expanding-window
 rolling-origin folds with the newest 15% of each training set held out for early stopping.
 
@@ -207,27 +225,27 @@ broadcast drift is marginally better on test — selection is by validation.)
 
 ## API
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/health` | Always 200: model/telemetry present, active `profile`; `?check_llm=true` probes LM Studio |
-| GET | `/model/info` | Model metadata: test MAE, hyperparameters, candidates and satellites (navic) |
-| GET | `/telemetry` | Latest rows; `satellite_id` filter; lists available `satellites` |
-| GET | `/predict/evaluate` | Test-split MAE/RMSE per step, actual/predicted/residual series, baseline comparison, `skill_vs_persistence`; `satellite_id` (navic) |
-| POST | `/predict` | Forecast from a raw window or the latest rows of `satellite_id` (navic windows are `[clock_bias_s, clock_drift_s_per_s]` rows) |
-| POST | `/anomaly-report` | Numeric evaluation + residual anomaly detection (deterministic `nominal/watch/anomalous`, optional `z_threshold`, `satellite_id`), optionally narrated by a local LLM |
+| Method | Path                | Description                                                                                                                                                           |
+| ------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/health`           | Always 200: model/telemetry present, active `profile`; `?check_llm=true` probes LM Studio                                                                             |
+| GET    | `/model/info`       | Model metadata: test MAE, hyperparameters, candidates and satellites (navic)                                                                                          |
+| GET    | `/telemetry`        | Latest rows; `satellite_id` filter; lists available `satellites`                                                                                                      |
+| GET    | `/predict/evaluate` | Test-split MAE/RMSE per step, actual/predicted/residual series, baseline comparison, `skill_vs_persistence`; `satellite_id` (navic)                                   |
+| POST   | `/predict`          | Forecast from a raw window or the latest rows of `satellite_id` (navic windows are `[clock_bias_s, clock_drift_s_per_s]` rows)                                        |
+| POST   | `/anomaly-report`   | Numeric evaluation + residual anomaly detection (deterministic `nominal/watch/anomalous`, optional `z_threshold`, `satellite_id`), optionally narrated by a local LLM |
 
 Response changes since v0.2 are additive. Error handling: missing model/telemetry → `503`, bad input
 (wrong window shape, unknown satellite, data gap in the latest window) → `422`.
 
 **Configuration (environment)**
 
-| variable | effect |
-|---|---|
-| `NAVIGUARD_PROFILE` | `synthetic` (default) or `navic` |
-| `NAVIGUARD_API_KEY` | if set, every endpoint except `/health` requires an `X-API-Key` header (the dashboard sends it from the same variable) |
-| `NAVIGUARD_CORS_ORIGINS` | JSON list of allowed browser origins (defaults to local Streamlit/React/Vite ports) |
-| `NAVIGUARD_API_URL` | where the dashboard finds the API |
-| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_S` | local LLM (LM Studio) settings |
+| variable                                     | effect                                                                                                                 |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `NAVIGUARD_PROFILE`                          | `synthetic` (default) or `navic`                                                                                       |
+| `NAVIGUARD_API_KEY`                          | if set, every endpoint except `/health` requires an `X-API-Key` header (the dashboard sends it from the same variable) |
+| `NAVIGUARD_CORS_ORIGINS`                     | JSON list of allowed browser origins (defaults to local Streamlit/React/Vite ports)                                    |
+| `NAVIGUARD_API_URL`                          | where the dashboard finds the API                                                                                      |
+| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_S` | local LLM (LM Studio) settings                                                                                         |
 
 **Anomaly detector.** Step-1 residuals on the validation split are calibrated to a robust median/MAD
 baseline; test residuals are scored as robust z and flagged above a threshold. In the `navic` profile the
@@ -268,10 +286,11 @@ anomaly evaluation, the navic train/save/load round trip, and the API in both pr
 ## Related work
 
 Clock-bias prediction with recurrent networks is an active area (verify details before citing):
-1. Huang B., Ji Z. (2021) — SL-LSTM for GPS clock bias, *GPS Solutions*
-2. He S., Liu J. (2023) — LSTM for BDS-3 clock prediction, *GPS Solutions*
-3. Cai C., Liu M. (2024) — LSTM-Attention for BDS, *GPS Solutions*
-4. Bhatt A., Mehta I. (2024) — LSTM for Galileo clock bias, *arXiv:2411.07015*
+
+1. Huang B., Ji Z. (2021) — SL-LSTM for GPS clock bias, _GPS Solutions_
+2. He S., Liu J. (2023) — LSTM for BDS-3 clock prediction, _GPS Solutions_
+3. Cai C., Liu M. (2024) — LSTM-Attention for BDS, _GPS Solutions_
+4. Bhatt A., Mehta I. (2024) — LSTM for Galileo clock bias, _arXiv:2411.07015_
 
 ---
 
@@ -289,4 +308,4 @@ Docker.
 Siddhant — modelling, benchmark, API, real-data pipeline · Om — preprocessing · Pratyush Narain —
 dashboard design.
 
-*Relevant to SDG 9 (Industry, Innovation and Infrastructure): dependable satellite-navigation timing.*
+_Relevant to SDG 9 (Industry, Innovation and Infrastructure): dependable satellite-navigation timing._
