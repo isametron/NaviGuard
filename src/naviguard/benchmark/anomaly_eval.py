@@ -15,6 +15,8 @@ Detectors (all calibrated on the nominal first 60% of each series, evaluated on 
     ridge_z     robust-z of a ridge one-step forecaster's error (learned)
     cusum       two-sided CUSUM on the standardised physics residual
     iforest     Isolation Forest on the recent relative-window shape
+    refit_aware physics robust-z, but jumps shaped like routine refits (isolated level shifts,
+                partial reversions) are suppressed; only spikes and sustained excursions alarm
 """
 
 import os
@@ -23,10 +25,11 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 
+from naviguard.anomaly.refit import classify_jumps, shape_counts
 from naviguard.benchmark.models import RidgeDirect
 from naviguard.benchmark.windows import SatSeries, load_series, make_windows
 
-DETECTORS = ("physics_z", "physics_adaptive", "ridge_z", "cusum", "iforest")
+DETECTORS = ("physics_z", "physics_adaptive", "ridge_z", "cusum", "iforest", "refit_aware")
 KINDS = {"spike": 2, "step": 1, "ramp": 10}          # label span (samples)
 MAGNITUDES = (3, 5, 10, 20)                          # in nominal-residual sigmas
 Z_THRESHOLD = 4.0
@@ -99,13 +102,24 @@ class _Scorer:
         phys = (w.y[:, 0] - w.X[:, -1, 1] - self.phys_c) / self.phys_s
         ridge = (w.y[:, 0] - self.ridge.predict(w.X)[:, 0] - self.ridge_c) / self.ridge_s
         iso = -self.iso.score_samples(self._feat(w.X))
+        refit_alarms, _ = classify_jumps(phys, _contiguous(w), thr=Z_THRESHOLD)
         return {"physics_z": np.abs(phys), "physics_adaptive": np.abs(self._adaptive(w, phys)),
-                "ridge_z": np.abs(ridge), "cusum": phys, "iforest": iso}
+                "ridge_z": np.abs(ridge), "cusum": phys, "iforest": iso,
+                "refit_aware": refit_alarms.astype(float)}
 
     def alarms(self, sc):
         return {"physics_z": sc["physics_z"] > Z_THRESHOLD, "physics_adaptive": sc["physics_adaptive"] > Z_THRESHOLD,
                 "ridge_z": sc["ridge_z"] > Z_THRESHOLD,
-                "cusum": _cusum_alarms(sc["cusum"]), "iforest": sc["iforest"] > self.iso_thr}
+                "cusum": _cusum_alarms(sc["cusum"]), "iforest": sc["iforest"] > self.iso_thr,
+                "refit_aware": sc["refit_aware"] > 0.5}
+
+    def physics_z(self, w) -> np.ndarray:
+        return (w.y[:, 0] - w.X[:, -1, 1] - self.phys_c) / self.phys_s
+
+
+def _contiguous(w) -> np.ndarray:
+    """contiguous[j] is True when window j+1 targets the record right after window j."""
+    return np.r_[np.diff(w.i) == 1, False]
 
 
 def _event_starts(w, test_lo: int, n_events: int, span: int, rng: np.random.Generator, spacing: int = 40):
@@ -200,6 +214,23 @@ def real_event_agreement(csv_path: str, seq_len: int = 20, margin: int = 2) -> p
     return pd.DataFrame(out)
 
 
+def natural_jump_shapes(csv_path: str, seq_len: int = 20) -> pd.DataFrame:
+    """Shape of every natural |z| > threshold jump on the unmodified series, per satellite."""
+    out = []
+    for sat, s in sorted(load_series(csv_path).items()):
+        try:
+            w = make_windows(s, seq_len, 1)
+        except ValueError:
+            continue
+        n = len(w.i)
+        tr = slice(0, int(n * 0.6))
+        scorer = _Scorer(type(w)(X=w.X[tr], y=w.y[tr], i=w.i[tr], last_bias_ns=w.last_bias_ns[tr],
+                                 t_target=w.t_target[tr]), seq_len)
+        _, events = classify_jumps(scorer.physics_z(w), _contiguous(w), thr=Z_THRESHOLD)
+        out.append({"satellite": sat, "jumps": len(events), **shape_counts(events)})
+    return pd.DataFrame(out)
+
+
 def run_anomaly_eval(csv_path: str, out_dir: str, seq_len: int = 20, n_events: int = 8, trials: int = 5,
                      min_windows: int = 400, verbose: bool = True) -> pd.DataFrame:
     os.makedirs(out_dir, exist_ok=True)
@@ -225,11 +256,14 @@ def run_anomaly_eval(csv_path: str, out_dir: str, seq_len: int = 20, n_events: i
     fas.to_csv(os.path.join(out_dir, "false_alarms.csv"), index=False)
     real = real_event_agreement(csv_path, seq_len)
     real.to_csv(os.path.join(out_dir, "real_events.csv"), index=False)
-    write_anomaly_summary(events, fas, real, out_dir)
+    shapes = natural_jump_shapes(csv_path, seq_len)
+    shapes.to_csv(os.path.join(out_dir, "natural_jump_shapes.csv"), index=False)
+    write_anomaly_summary(events, fas, real, out_dir, shapes)
     return events
 
 
-def write_anomaly_summary(events: pd.DataFrame, fas: pd.DataFrame, real: pd.DataFrame, out_dir: str) -> None:
+def write_anomaly_summary(events: pd.DataFrame, fas: pd.DataFrame, real: pd.DataFrame, out_dir: str,
+                          shapes: pd.DataFrame | None = None) -> None:
     rec = (events.groupby(["kind", "magnitude_sigma", "detector"])["detected"].mean()
            .unstack("detector")[list(DETECTORS)])
     delay = events.groupby(["detector"])["delay"].median()
@@ -266,5 +300,14 @@ def write_anomaly_summary(events: pd.DataFrame, fas: pd.DataFrame, real: pd.Data
     for _, r in real.iterrows():
         lines.append(f"| I{int(r.satellite):02d} | {int(r.n_flagged)}/{int(r.n_test)} | "
                      f"{r.flagged_share_near_meta:.2f} | {r.chance_share_near_meta:.2f} | {r.lift:.1f}× |")
+    if shapes is not None and len(shapes):
+        lines += ["", f"## Shape of natural |z| > {Z_THRESHOLD:g} jumps on the unmodified series\n",
+                  "Refit = isolated level shift or partial reversion; spike = near-full reversion on the next "
+                  "record; sustained = several same-sign excursions; edge = gap or series end in the look-ahead.\n",
+                  "| satellite | jumps | refit | spike | sustained | edge |", "|---|---|---|---|---|---|"]
+        for _, r in shapes.iterrows():
+            tot = max(int(r.jumps), 1)
+            cells = [f"{int(r[k])} ({100 * r[k] / tot:.0f}%)" for k in ("refit", "spike", "sustained", "edge")]
+            lines.append(f"| I{int(r.satellite):02d} | {int(r.jumps)} | " + " | ".join(cells) + " |")
     with open(os.path.join(out_dir, "summary.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")

@@ -158,3 +158,34 @@ def test_pooled_benchmark_merges_rows_and_is_leak_free(tmp_path):
     p = pooled(res)
     mae = p[p["step"] == 1].groupby("model")["mae"].mean()
     assert mae["ridge_pooled"] < mae["persistence"]
+
+
+def test_benchmark_writes_predictions_and_bootstrap_cis(tmp_path):
+    import pandas as pd
+
+    s = _series(seed=4)
+    pd.DataFrame({"satellite_id": 2, "timestamp_s": s.t, "clock_bias_s": s.bias_ns * 1e-9,
+                  "clock_drift_s_per_s": s.drift}).to_csv(tmp_path / "t.csv", index=False)
+    out = tmp_path / "out"
+    run_benchmark(str(tmp_path / "t.csv"), str(out), models=("persistence", "broadcast_drift"), seq_len=10,
+                  horizon=4, n_folds=2, seeds=1, min_windows=100, verbose=False)
+    ci = pd.read_csv(out / "ci.csv")
+    assert set(ci["step"]) == {1, 4} and set(ci["quantity"]) == {"mae"}     # no attn_lstm -> no deltas
+    assert ((ci["ci_lo"] <= ci["value"]) & (ci["value"] <= ci["ci_hi"])).all()
+    z = np.load(out / "predictions_I02.npz")
+    mae4 = np.abs(z["y"][:, 3] - z["broadcast_drift"][:, 3]).mean()
+    row = ci[(ci.model == "broadcast_drift") & (ci.step == 4)].iloc[0]
+    assert row["value"] == pytest.approx(mae4, rel=1e-5)
+    assert (out / "ci.md").exists()
+
+
+def test_bootstrap_ci_rows_detect_a_clearly_better_reference():
+    from naviguard.benchmark.run import bootstrap_ci_rows
+
+    rng = np.random.default_rng(0)
+    y = rng.normal(0, 1, (400, 3))
+    ens = {"attn_lstm": y + rng.normal(0, 0.1, y.shape), "persistence": y + rng.normal(0, 2.0, y.shape)}
+    rows = {(r["model"], r["step"], r["quantity"]): r for r in bootstrap_ci_rows(2, y, ens, horizon=3)}
+    d = rows[("persistence", 3, "diff_vs_attn_lstm")]
+    assert d["value"] > 0 and d["ci_lo"] > 0          # reference significantly better
+    assert rows[("persistence", 1, "mae")]["block"] == 12

@@ -2,8 +2,10 @@
 
 For every satellite, windows are built level-free (see windows.py), split into purged
 rolling-origin folds, and every model is fitted per fold (neural models over several
-seeds). Outputs a tidy results CSV, a Markdown/LaTeX summary, and Diebold–Mariano tests
-of the attention-LSTM against every other model.
+seeds). Outputs a tidy results CSV, a Markdown/LaTeX summary, Diebold–Mariano tests of the
+attention-LSTM against every other model, moving-block bootstrap 95% confidence intervals
+(ci.csv / ci.md), and the per-window test predictions (predictions_Ixx.npz) so the tests
+and intervals can be recomputed without retraining.
 """
 
 import os
@@ -13,8 +15,60 @@ import numpy as np
 import pandas as pd
 
 from naviguard.benchmark.models import ALL_MODELS, NEURAL, make_model
-from naviguard.benchmark.stats import diebold_mariano
+from naviguard.benchmark.stats import block_bootstrap_ci, diebold_mariano
 from naviguard.benchmark.windows import load_series, make_windows, rolling_origin_folds
+
+CI_REFERENCE = "attn_lstm"
+CI_N_BOOT = 2000
+
+
+def bootstrap_ci_rows(sat: int, y_test: np.ndarray, ens: dict[str, np.ndarray], horizon: int,
+                      reference: str = CI_REFERENCE, n_boot: int = CI_N_BOOT) -> list[dict]:
+    """Moving-block bootstrap 95% CIs at the first and last forecast step.
+
+    For every model: the MAE of its (seed-ensemble) forecast. Against `reference`: the mean
+    absolute-error difference (model minus reference; positive means the reference is better).
+    Overlapping multi-step forecasts are autocorrelated over about `step` windows, so the block
+    length is max(12, step).
+    """
+    rows = []
+    for step in sorted({1, horizon}):
+        block = max(12, step)
+        ref_err = np.abs(y_test[:, step - 1] - ens[reference][:, step - 1]) if reference in ens else None
+        for name, pred in ens.items():
+            err = np.abs(y_test[:, step - 1] - pred[:, step - 1])
+            lo, hi = block_bootstrap_ci(err, block=block, n_boot=n_boot)
+            rows.append(dict(satellite=sat, model=name, step=step, quantity="mae", value=float(err.mean()),
+                             ci_lo=lo, ci_hi=hi, block=block))
+            if ref_err is not None and name != reference:
+                d = err - ref_err
+                lo, hi = block_bootstrap_ci(d, block=block, n_boot=n_boot)
+                rows.append(dict(satellite=sat, model=name, step=step, quantity=f"diff_vs_{reference}",
+                                 value=float(d.mean()), ci_lo=lo, ci_hi=hi, block=block))
+    return rows
+
+
+def write_ci_summary(ci: pd.DataFrame, out_dir: str, reference: str = CI_REFERENCE) -> None:
+    lines = ["# Moving-block bootstrap 95% confidence intervals (seed-ensemble forecasts)\n",
+             f"MAE in ns. Δ = MAE(model) − MAE({reference}); a positive Δ means {reference} is better. "
+             "A Δ interval that excludes 0 is marked *.\n",
+             "Note: these use the seed-ensemble (mean) forecast, so MAE values can differ slightly from "
+             "summary.md, which averages per-seed MAEs.\n"]
+    for sat, g in ci.groupby("satellite"):
+        for step, gs in g.groupby("step"):
+            lines += ["", f"## I{int(sat):02d}, step {int(step)} (block {int(gs['block'].iloc[0])})\n",
+                      f"| model | MAE [95% CI] | Δ vs {reference} [95% CI] |", "|---|---|---|"]
+            mae = gs[gs["quantity"] == "mae"].set_index("model")
+            diff = gs[gs["quantity"] == f"diff_vs_{reference}"].set_index("model")
+            for model, r in mae.sort_values("value").iterrows():
+                cell = "—"
+                if model in diff.index:
+                    d = diff.loc[model]
+                    star = " *" if (d.ci_lo > 0 or d.ci_hi < 0) else ""
+                    cell = f"{d.value:+.2f} [{d.ci_lo:+.2f}, {d.ci_hi:+.2f}]{star}"
+                lines.append(f"| {model} | {r.value:.2f} [{r.ci_lo:.2f}, {r.ci_hi:.2f}] | {cell} |")
+    with open(os.path.join(out_dir, "ci.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def run_benchmark(
@@ -33,7 +87,7 @@ def run_benchmark(
 ) -> pd.DataFrame:
     os.makedirs(out_dir, exist_ok=True)
     series = load_series(csv_path)
-    rows, dm_rows = [], []
+    rows, dm_rows, ci_rows = [], [], []
     done: set[int] = set()
     if resume and os.path.exists(os.path.join(out_dir, "results.csv")):
         prev = pd.read_csv(os.path.join(out_dir, "results.csv"))
@@ -41,6 +95,8 @@ def run_benchmark(
         done = set(prev["satellite"].unique())
         dm_path = os.path.join(out_dir, "dm_tests.csv")
         dm_rows = pd.read_csv(dm_path).to_dict("records") if os.path.exists(dm_path) else []
+        ci_path = os.path.join(out_dir, "ci.csv")
+        ci_rows = pd.read_csv(ci_path).to_dict("records") if os.path.exists(ci_path) else []
         if verbose:
             print(f"[bench] resuming; already done: {sorted(done)}")
     t_start = time.time()
@@ -97,15 +153,24 @@ def run_benchmark(
                                               horizon=step + 1)
                     dm_rows.append(dict(satellite=sat, vs=name, step=step + 1, dm_stat=stat, p_value=p))
 
+        # Per-window test predictions (seed-ensemble mean) + bootstrap confidence intervals.
+        ens = {name: np.mean(ps, axis=0) for name, ps in preds.items()}
+        np.savez_compressed(os.path.join(out_dir, f"predictions_I{sat:02d}.npz"), y=y_test.astype(np.float32),
+                            **{name: p.astype(np.float32) for name, p in ens.items()})
+        ci_rows += bootstrap_ci_rows(sat, y_test, ens, horizon)
+
         # Save after every satellite so an interrupted run keeps what it finished.
         pd.DataFrame(rows).to_csv(os.path.join(out_dir, "results.csv"), index=False)
         if dm_rows:
             pd.DataFrame(dm_rows).to_csv(os.path.join(out_dir, "dm_tests.csv"), index=False)
+        pd.DataFrame(ci_rows).to_csv(os.path.join(out_dir, "ci.csv"), index=False)
 
     if not rows:
         raise ValueError("no satellite had enough windows; fetch more days (naviguard fetch --days N)")
     res = pd.DataFrame(rows)
     write_summary(res, out_dir, horizon)
+    if ci_rows:
+        write_ci_summary(pd.DataFrame(ci_rows), out_dir)
     return res
 
 
