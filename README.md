@@ -296,14 +296,15 @@ Clock-bias prediction with recurrent networks is an active area (verify details 
 
 ## Roadmap
 
-Done: cross-satellite pooled models, the 24 h (96-step) horizon, and per-satellite coverage reports.
+Done: cross-satellite pooled models, the 24 h (96-step) horizon, per-satellite coverage reports,
+block-bootstrap confidence intervals for model comparisons, and a refit-aware anomaly detector that
+separates routine ground-segment refits from faults (`anomaly-eval`; ~95% fewer false alarms).
 
 In progress: six-month dataset (Apr–Sep 2026).
 
 Next:
 
-- Separating natural refit discontinuities from true faults (change-point detection before residual scoring).
-- Block-bootstrap confidence intervals for model comparisons.
+- Expose the refit-aware detector through `/anomaly-report` (it currently runs only in `anomaly-eval`).
 - Kalman-filter clock baseline and hyperparameter tuning of the neural models.
 - Probabilistic (quantile or conformal) forecasts.
 - Precise clocks for GPS/Galileo/BeiDou (IGS `.CLK`) as an external validation set.
