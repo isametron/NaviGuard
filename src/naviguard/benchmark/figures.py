@@ -21,6 +21,7 @@ from naviguard.benchmark.windows import load_series, make_windows
 _COLORS = {
     "persistence": "#9e9e9e", "broadcast_drift": "#2e7d32", "linear_extrap": "#8d6e63", "arima_p10": "#ef6c00",
     "ridge": "#1565c0", "lstm": "#c62828", "gru": "#ad1457", "attn_lstm": "#6a1b9a",
+    "kalman": "#00838f",
 }
 
 

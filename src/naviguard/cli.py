@@ -115,8 +115,15 @@ def _cmd_coverage(args):
 
 def _cmd_benchmark(args):
     from naviguard.benchmark.models import ALL_MODELS
-    from naviguard.benchmark.run import run_benchmark, run_pooled_benchmark
+    from naviguard.benchmark.run import extend_benchmark, run_benchmark, run_pooled_benchmark
 
+    if args.extend:
+        if not args.models:
+            raise SystemExit("--extend needs --models, e.g. --models kalman,kalman_jump")
+        extend_benchmark(csv_path=args.csv, out_dir=args.out_dir, models=tuple(args.models.split(",")),
+                         seq_len=args.seq_len, horizon=args.horizon, n_folds=args.folds)
+        print(f"[benchmark] Added {args.models} to {args.out_dir} (other models not retrained)")
+        return
     if args.pooled:
         pooled_models = tuple(args.models.split(",")) if args.models else ("ridge", "arima_p10", "lstm", "gru", "attn_lstm")
         run_pooled_benchmark(
@@ -282,6 +289,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--resume", action="store_true", help="skip satellites already finished in --out-dir")
     p_bench.add_argument("--pooled", action="store_true",
                          help="train one model on all satellites (merged into an existing --out-dir)")
+    p_bench.add_argument("--extend", action="store_true",
+                         help="add classical --models to a finished --out-dir without retraining the others")
     p_bench.set_defaults(func=_cmd_benchmark)
 
     p_anom = sub.add_parser("anomaly-eval", help="Evaluate anomaly detectors on real series (injected + real events)")

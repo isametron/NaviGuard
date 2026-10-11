@@ -10,7 +10,8 @@
 
 - **Forecasting.** Predict a satellite's clock bias 1.5 h to 24 h ahead from its recent broadcast clock
   history. Compared against persistence, broadcast-drift extrapolation, linear extrapolation, ARIMA,
-  ridge regression, and LSTM / GRU / attention-LSTM networks, using leakage-free rolling-origin evaluation.
+  a two-state clock Kalman filter, ridge regression, and LSTM / GRU / attention-LSTM networks, using
+  leakage-free rolling-origin evaluation.
 - **Anomaly monitoring.** A residual-based detector, evaluated on injected faults in real series and
   checked against independent broadcast metadata.
 - **Service.** A FastAPI service (and Streamlit dashboard) exposing forecasts, evaluation, and anomaly
@@ -36,10 +37,18 @@ folds; neural models are averaged over 3 seeds (± = seed std).
 | ------------------------- | ---------- | ----------- | ----------- |
 | persistence               | 48.3       | 143.7       | 286.6       |
 | **broadcast drift (af1)** | **4.2**    | **10.4**    | **20.0**    |
+| Kalman filter             | 5.2        | 11.1        | 20.4        |
 | ARIMA(p,1,0)              | 6.3        | 15.2        | 29.7        |
 | ridge                     | 6.7        | 13.2        | 23.5        |
 | LSTM                      | 11.1 ± 2.9 | 33.3 ± 5.3  | 58.3 ± 23.1 |
 | attention-LSTM            | 10.3 ± 1.8 | 31.0 ± 16.9 | 67.8 ± 22.8 |
+
+A two-state clock Kalman filter is second only to broadcast drift on average. Between uploads the
+broadcast clock is an exact polynomial, so af1 is hard to beat at short range. Further ahead, upcoming
+uploads matter more than the current slope, and the filter's longer-run drift estimate beats broadcast
+drift on I02: 14% lower MAE at 6 h, 38% lower at 24 h. Both 95% block-bootstrap intervals exclude zero.
+On the gappy I09/I10, broadcast drift stays best (Kalman is 1–32% worse), but the filter is well ahead
+of every learned model there.
 
 **2. On the cleanest satellite, attention helps — and the benefit grows with horizon.** On I02 (long,
 gap-free series) the attention-LSTM is best at steps 1, 12 and 24 of the 6 h (24-step) horizon and the seed
@@ -48,6 +57,7 @@ spread is tiny, while ridge/broadcast-drift are next:
 | I02, 24-step horizon | step 1          | step 12          | step 24          |
 | -------------------- | --------------- | ---------------- | ---------------- |
 | broadcast drift      | 2.72            | 20.10            | 35.29            |
+| Kalman filter        | 2.61            | 17.83            | 30.34            |
 | ridge                | 2.68            | 16.92            | 31.96            |
 | LSTM                 | 2.73 ± 0.01     | 18.85 ± 0.28     | 30.85 ± 3.04     |
 | **attention-LSTM**   | **2.51 ± 0.06** | **15.70 ± 0.04** | **23.08 ± 0.22** |
@@ -81,6 +91,9 @@ Reproduce everything:
 naviguard fetch --start 2026-07-15 --end 2026-09-21
 naviguard benchmark --seeds 3 --epochs 40 --folds 3 --horizon 6 --out-dir outputs/benchmark_h6
 naviguard benchmark --seeds 3 --epochs 40 --folds 3 --seq-len 48 --horizon 24 --out-dir outputs/benchmark_h24
+naviguard benchmark --seeds 3 --epochs 40 --folds 3 --seq-len 96 --horizon 96 --min-windows 150 --out-dir outputs/benchmark_h96
+# add a classical model to a finished run without retraining the neural models (same --seq-len/--horizon/--folds)
+naviguard benchmark --extend --models kalman --seq-len 48 --horizon 24 --out-dir outputs/benchmark_h24
 naviguard anomaly-eval
 naviguard report --bench "horizon 6 (1.5 h)=outputs/benchmark_h6" --bench "horizon 24 (6 h)=outputs/benchmark_h24"
 ```
@@ -109,7 +122,7 @@ NaviGuard/
 │   ├── anomaly/detect.py              # robust-z residual detector
 │   ├── benchmark/
 │   │   ├── windows.py                 # level-free windows, purged rolling-origin folds
-│   │   ├── models.py                  # persistence, broadcast-drift, linear, ARIMA, ridge, LSTM, GRU, attn-LSTM
+│   │   ├── models.py                  # persistence, broadcast-drift, linear, ARIMA, Kalman, ridge, LSTM, GRU, attn-LSTM
 │   │   ├── stats.py                   # Diebold–Mariano test, block bootstrap
 │   │   ├── run.py                     # per-satellite and pooled benchmarks (resumable)
 │   │   ├── anomaly_eval.py            # injected-fault + real-event detector evaluation
@@ -168,7 +181,7 @@ streamlit run frontend/dashboard.py    # http://localhost:8501; set NAVIGUARD_AP
 | `fetch`                            | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`)             |
 | `coverage`                         | per-satellite sample/gap summary and gap-aware eligibility by forecast horizon                                |
 | `train-navic`                      | train + select a model on real data for the `navic` profile                                                   |
-| `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`) |
+| `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`, `--extend`) |
 | `anomaly-eval`                     | detector evaluation: injected faults + real events vs metadata                                                |
 | `report`                           | figures and LaTeX tables from benchmark/anomaly outputs                                                       |
 | `serve` / `clean`                  | run the API / remove generated artifacts                                                                      |
@@ -218,6 +231,13 @@ Neural forecasters: 2-layer LSTM (64→32) or GRU, dropout 0.2, Dense(16), multi
 1e-3, MSE. The **attention-LSTM** replaces the last hidden state with additive (Bahdanau-style)
 attention pooling over per-timestep outputs. The synthetic-profile model also adds `LastValueSkip`, so
 the network predicts the change from the last observed bias.
+
+Kalman filter: the standard two-state clock model. It tracks bias and drift, with white-FM and
+random-walk-FM process noise, and measures the bias at every record, with noise floored at the 2⁻³¹ s
+af0 resolution. The broadcast drift enters once, as a drift measurement at the forecast origin.
+Feeding it in at every record would be wrong: af1 only changes at uploads, and each repeat would
+count as fresh evidence. The four variances are fitted by maximum likelihood on each fold's training
+windows.
 
 The `navic` profile trains broadcast-drift, ridge and attention-LSTM pooled across satellites and serves
 the one with the lowest **validation** MAE; test metrics for every candidate are recorded in
@@ -312,13 +332,13 @@ Clock-bias prediction with recurrent networks is an active area (verify details 
 Done: cross-satellite pooled models, the 24 h (96-step) horizon, per-satellite coverage reports,
 block-bootstrap confidence intervals for model comparisons, and a refit-aware anomaly detector that
 separates routine ground-segment refits from faults (~95% fewer false alarms; in `anomaly-eval` and
-`/anomaly-report`).
+`/anomaly-report`), and a two-state Kalman-filter clock baseline.
 
 In progress: six-month dataset (Apr–Sep 2026).
 
 Next:
 
-- Kalman-filter clock baseline and hyperparameter tuning of the neural models.
+- Hyperparameter tuning of the neural models.
 - Probabilistic (quantile or conformal) forecasts.
 - Precise clocks for GPS/Galileo/BeiDou (IGS `.CLK`) as an external validation set.
 - Allan deviation (frequency-stability) reporting alongside MAE, the standard metric in clock science.

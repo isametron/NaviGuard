@@ -78,6 +78,33 @@ def test_physical_baselines_beat_persistence_on_a_drifting_clock():
     assert errs["arima_p10"] < errs["persistence"] / 5
 
 
+def test_kalman_learns_the_drift_when_the_broadcast_af1_is_useless():
+    s = _series()
+    s.drift[:] = 0.0                                   # af1 missing: broadcast drift degenerates to persistence
+    w = make_windows(s, 12, 5)
+    errs = {}
+    for name in ("broadcast_drift", "kalman"):
+        m = make_model(name, 5).fit(w.X[:200], w.y[:200], w.X[200:250], w.y[200:250])
+        errs[name] = np.abs(w.y[250:] - m.predict(w.X[250:])).mean()
+    assert errs["kalman"] < errs["broadcast_drift"] / 10
+
+
+def test_kalman_beats_a_per_upload_noisy_af1_at_long_horizons_and_recovers_the_noise():
+    rng = np.random.default_rng(3)
+    n, H = 900, 24
+    bias = 5.6e5 + 30.0 * np.arange(n) + rng.normal(0, 0.5, n)
+    af1_ns = np.repeat(30.0 + rng.normal(0, 3.0, n // 15 + 1), 15)[:n]     # constant within each 15-record upload
+    s = SatSeries(satellite=2, t=np.arange(n) * STEP, bias_ns=bias, drift=af1_ns / STEP * 1e-9)
+    w = make_windows(s, 48, H)
+    errs = {}
+    for name in ("broadcast_drift", "kalman"):
+        m = make_model(name, H).fit(w.X[:500], w.y[:500], w.X[500:600], w.y[500:600])
+        errs[name] = np.abs(w.y[600:, -1] - m.predict(w.X[600:])[:, -1]).mean()
+    assert errs["kalman"] < 0.5 * errs["broadcast_drift"]
+    r, r_af1 = np.exp(m.log_var[2:])                  # ML recovers both measurement noises (0.5^2 and 3^2 ns^2)
+    assert 0.5 < (r + m.R_FLOOR) / 0.25 < 2 and 0.5 < r_af1 / 9.0 < 2
+
+
 def test_unknown_model_name():
     with pytest.raises(ValueError, match="unknown model"):
         make_model("transformer", 3)
@@ -177,6 +204,42 @@ def test_benchmark_writes_predictions_and_bootstrap_cis(tmp_path):
     row = ci[(ci.model == "broadcast_drift") & (ci.step == 4)].iloc[0]
     assert row["value"] == pytest.approx(mae4, rel=1e-5)
     assert (out / "ci.md").exists()
+
+
+def test_extend_benchmark_adds_a_model_without_retraining_the_others(tmp_path):
+    import pandas as pd
+
+    from naviguard.benchmark.run import extend_benchmark
+
+    s = _series(seed=5)
+    pd.DataFrame({"satellite_id": 2, "timestamp_s": s.t, "clock_bias_s": s.bias_ns * 1e-9,
+                  "clock_drift_s_per_s": s.drift}).to_csv(tmp_path / "t.csv", index=False)
+    out = tmp_path / "out"
+    kw = dict(seq_len=10, horizon=4, n_folds=2)
+    run_benchmark(str(tmp_path / "t.csv"), str(out), models=("persistence", "broadcast_drift"), seeds=1,
+                  min_windows=100, verbose=False, **kw)
+    with np.load(out / "predictions_I02.npz") as z:                 # stand-in reference for DM / CI deltas
+        saved = {k: z[k] for k in z.files}
+    np.savez_compressed(out / "predictions_I02.npz", attn_lstm=saved["broadcast_drift"], **saved)
+    before = pd.read_csv(out / "results.csv")
+
+    for _ in range(2):                                               # re-running replaces, never duplicates
+        res = extend_benchmark(str(tmp_path / "t.csv"), str(out), ("kalman",), verbose=False, **kw)
+    assert len(res) == len(before) + len(before[before.model == "persistence"])
+    pd.testing.assert_frame_equal(res[res.model != "kalman"].reset_index(drop=True), before)
+    with np.load(out / "predictions_I02.npz") as z:
+        assert "kalman" in z.files and np.array_equal(z["broadcast_drift"], saved["broadcast_drift"])
+    dm = pd.read_csv(out / "dm_tests.csv")
+    assert set(dm["vs"]) == {"kalman"} and len(dm) == 2
+    ci = pd.read_csv(out / "ci.csv")
+    assert set(ci[ci.model == "kalman"]["quantity"]) == {"mae", "diff_vs_attn_lstm"}
+    assert "kalman" in (out / "summary.md").read_text() and "kalman" in (out / "ci.md").read_text()
+
+    with pytest.raises(ValueError, match="do not match"):
+        extend_benchmark(str(tmp_path / "t.csv"), str(out), ("kalman",), seq_len=12, horizon=4, n_folds=2,
+                         verbose=False)
+    with pytest.raises(ValueError, match="classical"):
+        extend_benchmark(str(tmp_path / "t.csv"), str(out), ("gru",), verbose=False, **kw)
 
 
 def test_bootstrap_ci_rows_detect_a_clearly_better_reference():
