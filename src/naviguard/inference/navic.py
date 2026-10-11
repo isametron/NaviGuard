@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from naviguard.anomaly import detect as anomaly
+from naviguard.anomaly import refit
 from naviguard.benchmark.models import ARIMA, BroadcastDrift, LinearExtrap, Neural, RidgeDirect, make_model
 from naviguard.benchmark.windows import Windows, load_series, make_windows, relative_window, split_windows
 from naviguard.config import (
@@ -228,14 +229,23 @@ def detect_navic(artifacts: Artifacts, z_threshold: float | None = None, satelli
 
     Broadcast-clock residuals are heavy-tailed (see README), so unless a threshold is given the
     cut-off is the larger of the configured z and the 99.5th percentile of validation |z|.
+
+    The `refit_aware` block scores the same test windows on the broadcast-drift (physics) residual,
+    the signal the refit-aware detector was evaluated on (benchmark/anomaly_eval.py): it uses no
+    history, so a learned model cannot smear one jump over the following records. Jumps above the
+    configured z (or the given threshold) are classified by shape (anomaly/refit.py); refit-shaped
+    level shifts are reported but do not alarm, spikes and sustained excursions do.
     """
     per_sat = _windows(artifacts)
     if satellite_id is not None:
         if satellite_id not in per_sat:
             raise ValueError(f"unknown satellite_id {satellite_id}; available: {sorted(int(s) for s in per_sat)}")
         per_sat = {satellite_id: per_sat[satellite_id]}
+    refit_thr = z_threshold if z_threshold is not None else ANOMALY_Z_THRESHOLD
+    physics = BroadcastDrift(1)
     z_val, z_test, centers, scales = [], [], [], []
-    for w, ix in per_sat.values():
+    pz_test, sats, events = [], [], []
+    for sat, (w, ix) in per_sat.items():
         r_val = w.y[ix["val"], 0] - artifacts.model.predict(w.X[ix["val"]])[:, 0]
         r_test = w.y[ix["test"], 0] - artifacts.model.predict(w.X[ix["test"]])[:, 0]
         c, s = anomaly.calibrate(r_val)
@@ -243,11 +253,23 @@ def detect_navic(artifacts: Artifacts, z_threshold: float | None = None, satelli
         scales.append(s)
         z_val.append((r_val - c) / s)
         z_test.append((r_test - c) / s)
+
+        p_val = w.y[ix["val"], 0] - physics.predict(w.X[ix["val"]])[:, 0]
+        p_test = w.y[ix["test"], 0] - physics.predict(w.X[ix["test"]])[:, 0]
+        pc, ps = anomaly.calibrate(p_val)
+        pz = (p_test - pc) / ps
+        contiguous = np.r_[np.diff(w.i[ix["test"]]) == 1, False]
+        _, ev = refit.classify_jumps(pz, contiguous, thr=refit_thr)
+        offset = sum(len(z) for z in pz_test)                       # events index the pooled test windows
+        events += [(j + offset, label, k + offset if k >= 0 else -1) for j, label, k in ev]
+        pz_test.append(pz)
+        sats.append(np.full(len(pz), sat))
     z_val, z_test = np.concatenate(z_val), np.concatenate(z_test)
     thr = z_threshold if z_threshold is not None else max(
         ANOMALY_Z_THRESHOLD, float(np.quantile(np.abs(z_val), _EMPIRICAL_QUANTILE)))
     det = anomaly.detect(z_test, 0.0, 1.0, thr)
     det["center"], det["scale"] = float(np.mean(centers)), float(np.mean(scales))     # ns, averaged over satellites
+    det["refit_aware"] = refit.summarize(np.concatenate(pz_test), events, refit_thr, np.concatenate(sats))
     return det
 
 

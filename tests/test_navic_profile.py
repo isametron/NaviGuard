@@ -20,7 +20,7 @@ SEQ, HOR = 10, 3
 N = 700
 
 
-def _csv(path, jump_ns=0.0, sats=(2, 10)):
+def _csv(path, jump_ns=0.0, sats=(2, 10), spike_ns=0.0):
     frames = []
     for k, sat in enumerate(sats):
         rng = np.random.default_rng(k)
@@ -28,6 +28,8 @@ def _csv(path, jump_ns=0.0, sats=(2, 10)):
         bias_ns = 5.6e5 + slope * np.arange(N) + np.cumsum(rng.normal(0, 0.3, N)) + rng.normal(0, 0.5, N)
         if jump_ns:
             bias_ns[int(N * 0.93):] += jump_ns                     # a discontinuity late in the test region
+        if spike_ns:
+            bias_ns[int(N * 0.89)] += spike_ns                     # one bad sample, earlier in the test region
         frames.append(pd.DataFrame({
             "satellite_id": sat, "sample_id": np.arange(N), "timestamp_s": np.arange(N) * STEP,
             "clock_bias_s": bias_ns * 1e-9, "clock_drift_s_per_s": slope / STEP * 1e-9,
@@ -104,6 +106,26 @@ def test_evaluate_forecast_and_detection(trained):
     assert navic.detect_navic(arts, z_threshold=1e9)["n_flagged"] == 0
 
 
+@pytest.mark.parametrize("candidates", [("broadcast_drift",), ("ridge",)])
+def test_refit_aware_detection_alarms_on_spikes_but_not_level_shifts(tmp_path, monkeypatch, candidates):
+    csv = _csv(tmp_path / "navic.csv", jump_ns=400.0, spike_ns=400.0)
+    monkeypatch.setattr(navic, "CANDIDATES", candidates)
+    navic.train_navic(str(csv), str(tmp_path / "m"), seq_len=SEQ, horizon=HOR, verbose=False)
+    monkeypatch.setattr(navic, "NAVIC_TELEMETRY_CSV", str(csv))
+    det = navic.detect_navic(navic.load_navic(str(tmp_path / "m")))
+    ra = det["refit_aware"]
+    assert {(e["satellite_id"], e["label"]) for e in ra["events"]} == {
+        (2, "spike"), (10, "spike"), (2, "refit"), (10, "refit")}
+    assert ra["n_alarms"] == 2 and ra["severity"] in {"watch", "anomalous"}
+    assert len(ra["z_scores"]) == det["n_scored"]
+    for e in ra["events"]:                                   # indices line up with the pooled test windows
+        assert ra["z_scores"][e["index"]] == pytest.approx(e["z"]) and abs(e["z"]) > ra["z_threshold"]
+        if e["label"] == "spike":
+            assert e["alarm_index"] == e["index"] + 1 and e["alarm_index"] in ra["alarm_indices"]
+    sat10 = navic.detect_navic(navic.load_navic(str(tmp_path / "m")), satellite_id=10)["refit_aware"]
+    assert sat10["n_alarms"] == 1 and {e["satellite_id"] for e in sat10["events"]} == {10}
+
+
 def test_forecast_rejects_a_latest_window_with_a_gap(tmp_path, monkeypatch):
     csv = _csv(tmp_path / "navic.csv")
     df = pd.read_csv(csv)
@@ -156,3 +178,5 @@ def test_api_evaluate_predict_and_anomaly_report(client):
     rep = client.post("/anomaly-report", json={"include_llm": False}).json()
     assert rep["detection"]["n_flagged"] >= 1 and rep["detection"]["severity"] in {"watch", "anomalous"}
     assert rep["llm_status"] == "not requested"
+    ra = rep["detection"]["refit_aware"]                      # the only jump is a level shift: no alarm
+    assert ra["shape_counts"]["refit"] >= 1 and ra["n_alarms"] == 0 and ra["severity"] == "nominal"

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from naviguard.anomaly.refit import EDGE, REFIT, SPIKE, SUSTAINED, classify_jumps, shape_counts
+from naviguard.anomaly.refit import EDGE, REFIT, SPIKE, SUSTAINED, classify_jumps, shape_counts, summarize
 
 
 def _z(n=60, seed=0):
@@ -60,3 +60,17 @@ def test_shape_counts():
     z[30], z[31] = 8.0, -8.0
     _, events = classify_jumps(z, _contig(len(z)))
     assert shape_counts(events) == {SPIKE: 1, SUSTAINED: 0, REFIT: 1, EDGE: 0}
+
+
+def test_summarize_counts_only_alarmed_jumps_toward_severity():
+    z = _z()
+    z[10] = 30.0                                  # a huge refit: reported, but must not drive severity
+    z[30], z[31] = 5.0, -5.0                      # a modest spike
+    _, events = classify_jumps(z, _contig(len(z)))
+    out = summarize(z, events, 4.0, satellite_ids=np.full(len(z), 9))
+    assert (out["n_jumps"], out["n_alarms"], out["alarm_indices"]) == (2, 1, [31])
+    assert out["max_alarm_abs_z"] == 5.0 and out["severity"] == "watch"
+    assert out["events"][0] == {"index": 10, "label": REFIT, "alarm_index": None, "z": 30.0, "satellite_id": 9}
+
+    refits_only = summarize(z, [e for e in events if e[1] == REFIT], 4.0)
+    assert refits_only["severity"] == "nominal" and refits_only["events"][0]["satellite_id"] is None

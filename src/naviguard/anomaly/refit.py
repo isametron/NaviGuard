@@ -19,6 +19,8 @@ is indistinguishable from a refit by shape alone and is deliberately not flagged
 
 import numpy as np
 
+from naviguard.anomaly.detect import classify_severity
+
 SPIKE, SUSTAINED, REFIT, EDGE = "spike", "sustained", "refit", "edge"
 
 
@@ -68,3 +70,29 @@ def shape_counts(events) -> dict[str, int]:
     for _, label, _ in events:
         out[label] += 1
     return out
+
+
+def summarize(z: np.ndarray, events, z_threshold: float, satellite_ids=None) -> dict:
+    """API-ready summary of classify_jumps output.
+
+    `events` index into `z`, which may concatenate several satellites (classify each satellite
+    separately and offset its indices); satellite_ids[k] names the satellite of sample k.
+    Severity uses the same rules as the plain detector, counting only alarmed jumps.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    alarmed = [(j, c) for j, _, c in events if c >= 0]
+    max_z = max((abs(float(z[j])) for j, _ in alarmed), default=0.0)
+    return {
+        "z_threshold": float(z_threshold),
+        "n_jumps": len(events),
+        "n_alarms": len(alarmed),
+        "alarm_rate": len(alarmed) / len(z) if len(z) else 0.0,
+        "max_alarm_abs_z": max_z,
+        "severity": classify_severity(len(alarmed), len(z), max_z, z_threshold),
+        "shape_counts": shape_counts(events),
+        "alarm_indices": sorted(c for _, c in alarmed),
+        "z_scores": z.tolist(),
+        "events": [{"index": j, "label": label, "alarm_index": c if c >= 0 else None, "z": float(z[j]),
+                    "satellite_id": int(satellite_ids[j]) if satellite_ids is not None else None}
+                   for j, label, c in events],
+    }

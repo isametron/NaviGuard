@@ -77,6 +77,29 @@ class PredictResponse(BaseModel):
     generated_at: str
 
 
+class JumpEvent(BaseModel):
+    index: int                           # onset, an index into the test windows (as z_scores)
+    label: str                           # spike | sustained | refit | edge
+    alarm_index: Optional[int] = None    # where the alarm was raised (spike/sustained only)
+    z: float
+    satellite_id: Optional[int] = None
+
+
+class RefitAwareDetection(BaseModel):
+    """Same test windows scored on the broadcast-drift residual; jumps shaped like routine
+    ground-segment refits are reported but do not alarm."""
+    z_threshold: float
+    n_jumps: int                         # |z| above threshold, classified by shape
+    n_alarms: int                        # spikes + sustained excursions
+    alarm_rate: float
+    max_alarm_abs_z: float
+    severity: str                        # nominal | watch | anomalous, from alarms only
+    shape_counts: dict[str, int]
+    alarm_indices: list[int]
+    z_scores: list[float]                # robust z of the broadcast-drift residual, per test window
+    events: list[JumpEvent]
+
+
 class AnomalyDetection(BaseModel):
     z_threshold: float
     center: float            # ns — median residual on the nominal (validation) reference
@@ -88,6 +111,7 @@ class AnomalyDetection(BaseModel):
     severity: str            # nominal | watch | anomalous (deterministic, numeric)
     flagged_indices: list[int]
     z_scores: list[float]
+    refit_aware: Optional[RefitAwareDetection] = None   # navic profile only
 
 
 class AnomalyReportRequest(BaseModel):

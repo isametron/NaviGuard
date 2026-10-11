@@ -79,7 +79,8 @@ class LLMSettings(BaseSettings):
     api_key: str = "lm-studio"          # LM Studio ignores the value; openai SDK requires non-empty
     model: str = "llama-3.2-3b-instruct"  # override via LLM_MODEL if a different model is loaded in LM Studio
     timeout_s: float = 60.0             # local inference (esp. on CPU) can genuinely take tens of seconds
-    max_tokens: int = 400
+    max_tokens: int = 500
+    temperature: float = 0.7            # operator report; the JSON severity check always runs at 0.1
 
     model_config = SettingsConfigDict(env_prefix="LLM_")
 

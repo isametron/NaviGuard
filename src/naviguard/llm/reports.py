@@ -11,6 +11,7 @@ from naviguard.llm.prompts import (
 )
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+SEVERITY_TEMPERATURE = 0.1     # near-deterministic: small local models drift out of JSON when sampled warmly
 
 
 def generate_operator_report(stats: dict, client: LMStudioClient | None = None) -> str:
@@ -28,7 +29,7 @@ def assess_anomaly_severity(stats: dict, client: LMStudioClient | None = None) -
     not a replacement for it. Local instruct models aren't perfectly
     JSON-reliable, so parsing is defensive with a safe fallback."""
     client = client or LMStudioClient()
-    raw = client.chat(SEVERITY_SYSTEM_PROMPT, format_stats_for_prompt(stats))
+    raw = client.chat(SEVERITY_SYSTEM_PROMPT, format_stats_for_prompt(stats), temperature=SEVERITY_TEMPERATURE)
 
     match = _JSON_BLOCK_RE.search(raw)
     if match:

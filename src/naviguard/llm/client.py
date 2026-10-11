@@ -39,11 +39,11 @@ class LMStudioClient:
         except (APIConnectionError, APITimeoutError, APIError):
             return False
 
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, temperature: float | None = None) -> str:
         try:
             resp = self._client.chat.completions.create(
                 model=self.settings.model,
-                temperature=0.2,
+                temperature=self.settings.temperature if temperature is None else temperature,
                 max_tokens=self.settings.max_tokens,
                 messages=[
                     {"role": "system", "content": system},

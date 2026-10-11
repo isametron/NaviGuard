@@ -65,8 +65,11 @@ because ground-segment refits create frequent discontinuities. A Gaussian z-scor
 produces many alerts. On injected faults the detectors reach ≥0.99 recall at ≥10σ, but precision is low
 (best F1 ≈ 0.25–0.35; ~35–50 alarms per 1000 clean held-out windows for the z-score/CUSUM detectors, ~3 for
 Isolation Forest). Flagged real events did **not** coincide with URA-index/health changes (lift 0.5× on
-I02, 1.7× on I09 from only 33 flags), so they cannot be labelled as uploads. Separating natural refits
-from true faults is the main open problem.
+I02, 1.7× on I09 from only 33 flags), so they cannot be labelled as uploads. Most natural jumps are
+isolated level shifts from routine refits (96% / 66% / 87% of |z| > 4 jumps on I02 / I09 / I10). A
+refit-aware detector that alarms only on spikes and sustained excursions cuts false alarms to 2.3 per
+1000 (F1 0.77–0.82 on spikes ≥ 10σ, 0.89 on ramps ≥ 5σ), but by design misses persistent step faults,
+which look identical to refits.
 
 **Caveats.** Neural models are not tuned; the folds share data so significance tests are optimistic;
 the satellite average is dominated by the two hard satellites; NavIC coverage varies day to day (I06
@@ -232,7 +235,7 @@ broadcast drift is marginally better on test — selection is by validation.)
 | GET    | `/telemetry`        | Latest rows; `satellite_id` filter; lists available `satellites`                                                                                                      |
 | GET    | `/predict/evaluate` | Test-split MAE/RMSE per step, actual/predicted/residual series, baseline comparison, `skill_vs_persistence`; `satellite_id` (navic)                                   |
 | POST   | `/predict`          | Forecast from a raw window or the latest rows of `satellite_id` (navic windows are `[clock_bias_s, clock_drift_s_per_s]` rows)                                        |
-| POST   | `/anomaly-report`   | Numeric evaluation + residual anomaly detection (deterministic `nominal/watch/anomalous`, optional `z_threshold`, `satellite_id`), optionally narrated by a local LLM |
+| POST   | `/anomaly-report`   | Numeric evaluation + residual anomaly detection (deterministic `nominal/watch/anomalous`, optional `z_threshold`, `satellite_id`; refit-aware verdict in `detection.refit_aware` for navic), optionally narrated by a local LLM |
 
 Response changes since v0.2 are additive. Error handling: missing model/telemetry → `503`, bad input
 (wrong window shape, unknown satellite, data gap in the latest window) → `422`.
@@ -245,17 +248,27 @@ Response changes since v0.2 are additive. Error handling: missing model/telemetr
 | `NAVIGUARD_API_KEY`                          | if set, every endpoint except `/health` requires an `X-API-Key` header (the dashboard sends it from the same variable) |
 | `NAVIGUARD_CORS_ORIGINS`                     | JSON list of allowed browser origins (defaults to local Streamlit/React/Vite ports)                                    |
 | `NAVIGUARD_API_URL`                          | where the dashboard finds the API                                                                                      |
-| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_S` | local LLM (LM Studio) settings                                                                                         |
+| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_S`, `LLM_TEMPERATURE` | local LLM (LM Studio) settings; temperature (default 0.7) applies to the report only |
 
 **Anomaly detector.** Step-1 residuals on the validation split are calibrated to a robust median/MAD
 baseline; test residuals are scored as robust z and flagged above a threshold. In the `navic` profile the
 threshold is the larger of z = 4 and the 99.5th percentile of validation |z| (see finding 4), calibration
 is per satellite, and flags are candidates for review, not confirmed faults.
 
+In the `navic` profile, `detection.refit_aware` adds the refit-aware verdict. It scores the same test
+windows on the broadcast-drift residual at z = 4 (or the given `z_threshold`) and labels every jump
+`spike`, `sustained`, `refit` or `edge` (data gap), with its satellite. Only spikes and sustained
+excursions alarm or count toward its severity. The LLM is told to treat this as the primary verdict.
+
 **Local LLM (optional).** `POST /anomaly-report` can ask a local model via [LM Studio](https://lmstudio.ai)
 to narrate the already-computed statistics and give a severity second opinion. It never sees raw
-telemetry or forecasts anything. If LM Studio is not running the endpoint still returns `200` with the
-numeric analysis and an explanatory `llm_status`.
+telemetry or forecasts anything. It is told which data, satellites and model are in service, and is
+given values precomputed for it: errors in metres of range, lead times, and the best baseline. The
+report comes back as four plain-text lines (`Status:`, `Accuracy:`, `Anomalies:`, `Action:`). The
+severity check runs at temperature 0.1 so its JSON stays parseable. A 7–8B instruct model (e.g.
+Qwen2.5-7B or Llama-3.1-8B, 4-bit) writes noticeably better reports than the 3B default. If LM Studio
+is not running the endpoint still returns `200` with the numeric analysis and an explanatory
+`llm_status`.
 
 ---
 
@@ -298,13 +311,13 @@ Clock-bias prediction with recurrent networks is an active area (verify details 
 
 Done: cross-satellite pooled models, the 24 h (96-step) horizon, per-satellite coverage reports,
 block-bootstrap confidence intervals for model comparisons, and a refit-aware anomaly detector that
-separates routine ground-segment refits from faults (`anomaly-eval`; ~95% fewer false alarms).
+separates routine ground-segment refits from faults (~95% fewer false alarms; in `anomaly-eval` and
+`/anomaly-report`).
 
 In progress: six-month dataset (Apr–Sep 2026).
 
 Next:
 
-- Expose the refit-aware detector through `/anomaly-report` (it currently runs only in `anomaly-eval`).
 - Kalman-filter clock baseline and hyperparameter tuning of the neural models.
 - Probabilistic (quantile or conformal) forecasts.
 - Precise clocks for GPS/Galileo/BeiDou (IGS `.CLK`) as an external validation set.

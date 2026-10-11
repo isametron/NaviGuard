@@ -171,6 +171,7 @@ def test_anomaly_report_without_llm(client):
     det = body["detection"]
     assert det["severity"] in {"nominal", "watch", "anomalous"}
     assert det["n_scored"] == EXPECTED_TEST_WINDOWS
+    assert det["refit_aware"] is None               # refit classification is navic-profile only
 
 
 def test_anomaly_report_z_threshold_override(client):
@@ -183,7 +184,7 @@ def test_anomaly_report_with_llm_success(client, monkeypatch):
     seen = {}
 
     def fake_report(stats):
-        seen["detection"] = stats["detection"]
+        seen["detection"], seen["context"] = stats["detection"], stats["context"]
         return "All nominal."
 
     monkeypatch.setattr("naviguard.api.routes.anomaly.generate_operator_report", fake_report)
@@ -199,6 +200,7 @@ def test_anomaly_report_with_llm_success(client, monkeypatch):
     assert body["llm_severity"]["severity"] == "nominal"
     assert body["llm_status"] == "ok"
     assert seen["detection"]["n_scored"] == EXPECTED_TEST_WINDOWS   # LLM is given the detector verdict
+    assert seen["context"]["profile"] == "synthetic" and seen["context"]["model"] == "attn_lstm"
 
 
 def test_anomaly_report_with_llm_unavailable_degrades_gracefully(client, monkeypatch):

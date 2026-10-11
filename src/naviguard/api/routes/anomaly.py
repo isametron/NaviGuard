@@ -5,12 +5,25 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException
 
 from naviguard.api.schemas import AnomalyReportRequest, AnomalyReportResponse, EvaluateResponse
+from naviguard.data.generate import DEFAULT_INTERVAL_S
 from naviguard.inference.artifacts import Artifacts, get_artifacts
 from naviguard.inference.predict import detect_anomalies, evaluate_on_test
 from naviguard.llm.client import LMStudioUnavailableError
 from naviguard.llm.reports import assess_anomaly_severity, generate_operator_report
 
 router = APIRouter()
+
+
+def _llm_context(artifacts: Artifacts, satellite_id: int | None) -> dict:
+    """What the LLM needs to know about the setup, beyond the computed numbers."""
+    meta = artifacts.meta
+    return {
+        "profile": meta.get("profile", "synthetic"),
+        "model": (meta.get("hparams") or {}).get("kind", "attn_lstm"),    # synthetic always serves the attn-LSTM
+        "step_s": meta.get("step_s", DEFAULT_INTERVAL_S),
+        "satellites": meta.get("satellites"),
+        "satellite_id": satellite_id,
+    }
 
 
 @router.post("/anomaly-report", response_model=AnomalyReportResponse)
@@ -37,7 +50,7 @@ def anomaly_report(
     if req.include_llm:
         # The LLM is told about the detector's verdict but never asked to
         # compute anything; the two calls are independent, so run them together.
-        stats = {**result, "detection": detection}
+        stats = {**result, "detection": detection, "context": _llm_context(artifacts, req.satellite_id)}
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 report_f = pool.submit(generate_operator_report, stats)
