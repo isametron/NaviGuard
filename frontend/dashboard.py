@@ -14,6 +14,7 @@ Run:
     # real NavIC data:  NAVIGUARD_PROFILE=navic uvicorn naviguard.api.main:app
 """
 
+import html
 import os
 
 import matplotlib
@@ -77,7 +78,7 @@ st.markdown(
     }}
     [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] label,
-    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] span:not([data-testid="stIconMaterial"]),
     [data-testid="stSidebar"] .stCaption {{
         color: #a8a8a8 !important;
         font-family: 'Inter', sans-serif !important;
@@ -706,36 +707,27 @@ if eval_status == 200:
         # ── Residual anomaly detector (deterministic; runs with or without the LLM) ──
         det = report_body.get("detection")
         if det:
-            sev_bg = {"nominal": CARD_MINT, "watch": CARD_YELLOW, "anomalous": CARD_PINK}.get(det["severity"], CARD_CREAM)
-            st.markdown(
-                f"""
-                <div class="card-title" style="margin-top:6px;">residual anomaly detector
-                    <span class="status-pill" style="background:{sev_bg};margin-left:8px;">{det['severity']}</span>
-                </div>
-                <div class="card-sub" style="margin-top:6px;line-height:1.55;">
-                    {det['n_flagged']} of {det['n_scored']} test windows flagged
-                    (|robust z| &gt; {det['z_threshold']:.1f}) · largest |z| = {det['max_abs_z']:.1f}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if det.get("z_scores"):
-                # Anomaly timeline: |z| per test window, threshold line, flagged windows highlighted.
-                z_abs = pd.Series([abs(z) for z in det["z_scores"]])
-                flagged = det.get("flagged_indices") or []
-                thr = det["z_threshold"]
+            sev_colors = {"nominal": CARD_MINT, "watch": CARD_YELLOW, "anomalous": CARD_PINK}
+            ra = det.get("refit_aware")  # navic profile only; None on the synthetic profile
+
+            def draw_timeline(z_vals, thr, title, red_idx, red_label, grey_idx=None):
+                """|robust z| per test window, threshold line, grey dots (refit/edge), red dots (alarms)."""
+                z_abs = pd.Series(z_vals).abs().values
+                n = len(z_abs)
+                red = [i for i in red_idx if 0 <= i < n]
+                grey = [i for i in (grey_idx or []) if 0 <= i < n]
                 fig, ax = plt.subplots(figsize=(11, 3.2), facecolor=CARD_CREAM)
                 ax.set_facecolor(CARD_CREAM)
-                ax.axhspan(0, thr, color=CARD_MINT, alpha=0.30, label="within threshold")
-                ax.plot(z_abs.values, color=INK, lw=1.6, solid_capstyle="round", label="|robust z|")
+                ax.axhspan(0, thr, color=CARD_MINT, alpha=0.30)
+                ax.plot(z_abs, color=INK, lw=1.4, solid_capstyle="round", label="|robust z|")
                 ax.axhline(thr, color="#c0392b", lw=1.4, ls="--", label=f"threshold ({thr:.1f})")
-                if flagged:
-                    ax.scatter(flagged, z_abs.values[flagged], color="#c0392b", s=22, zorder=3,
-                               label=f"flagged ({len(flagged)})")
-                ax.set_title(
-                    f"{det['severity']} · {det['n_flagged']} of {det['n_scored']} windows flagged",
-                    fontsize=9, color=INK, loc="left",
-                )
+                if grey:
+                    ax.scatter(grey, z_abs[grey], color="#9a9a9a", s=22, zorder=3,
+                               label=f"refit / edge ({len(grey)})")
+                if red:
+                    ax.scatter(red, z_abs[red], color="#c0392b", s=26, zorder=4,
+                               label=f"{red_label} ({len(red)})")
+                ax.set_title(title, fontsize=9, color=INK, loc="left")
                 ax.set_xlabel("test window", fontsize=8, color=INK, alpha=0.45)
                 ax.set_ylabel("|robust z|", fontsize=8, color=INK, alpha=0.45)
                 ax.tick_params(colors=INK, labelsize=7, length=0)
@@ -744,25 +736,100 @@ if eval_status == 200:
                     spine.set_visible(False)
                 ax.grid(alpha=0.12, linestyle="-", color=INK)
                 fig.tight_layout(pad=0.8)
-                st.pyplot(fig, width="stretch")
-            if is_navic:
-                st.caption(
-                    "broadcast-clock residuals are heavy-tailed (frequent natural refit discontinuities), so the "
-                    "threshold is the larger of the configured z and the 99.5th percentile of validation |z|; "
-                    "flags are candidates for review, not confirmed faults."
+                return fig
+
+            if ra:
+                # Refit-aware detector is the main verdict: routine refits are shown but don't alarm.
+                sev_bg = sev_colors.get(ra["severity"], CARD_CREAM)
+                sc = ra["shape_counts"]
+
+                def plural(n, word):
+                    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+                parts = [plural(sc.get("refit", 0), "refit"), plural(sc.get("spike", 0), "spike"),
+                         f"{sc.get('sustained', 0)} sustained"]
+                if sc.get("edge", 0):
+                    parts.append(f"{sc['edge']} edge")
+                summary = f"{plural(ra['n_jumps'], 'jump')}: {', '.join(parts)} → {plural(ra['n_alarms'], 'alarm')}"
+                st.markdown(
+                    f"""
+                    <div class="card-title" style="margin-top:6px;">residual anomaly detector
+                        <span class="status-pill" style="background:{sev_bg};margin-left:8px;">{ra['severity']}</span>
+                    </div>
+                    <div class="card-sub" style="margin-top:6px;line-height:1.55;">
+                        {summary}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
+                if ra.get("z_scores"):
+                    grey_idx = [e["index"] for e in ra["events"] if e["label"] in ("refit", "edge")]
+                    fig = draw_timeline(
+                        ra["z_scores"], ra["z_threshold"],
+                        f"{ra['severity']} · {plural(ra['n_alarms'], 'alarm')}", ra["alarm_indices"], "alarm", grey_idx,
+                    )
+                    st.pyplot(fig, width="stretch")
+                    plt.close(fig)
+                st.caption(
+                    "scored on the broadcast-drift residual. jumps shaped like routine ground-segment refits "
+                    "(isolated level shifts, grey) are reported but do not alarm; only spikes and sustained "
+                    "excursions (red) do. alarms are candidates for review, not confirmed faults."
+                )
+                st.caption(
+                    f"raw detector (no refit handling): {det['severity']} · {det['n_flagged']} of "
+                    f"{det['n_scored']} windows above |z| {det['z_threshold']:.1f} · largest |z| = "
+                    f"{det['max_abs_z']:.1f} — over-flags routine refits"
+                )
+            else:
+                # No refit_aware block (synthetic profile): original card and timeline.
+                sev_bg = sev_colors.get(det["severity"], CARD_CREAM)
+                st.markdown(
+                    f"""
+                    <div class="card-title" style="margin-top:6px;">residual anomaly detector
+                        <span class="status-pill" style="background:{sev_bg};margin-left:8px;">{det['severity']}</span>
+                    </div>
+                    <div class="card-sub" style="margin-top:6px;line-height:1.55;">
+                        {det['n_flagged']} of {det['n_scored']} test windows flagged
+                        (|robust z| &gt; {det['z_threshold']:.1f}) · largest |z| = {det['max_abs_z']:.1f}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                if det.get("z_scores"):
+                    fig = draw_timeline(
+                        det["z_scores"], det["z_threshold"],
+                        f"{det['severity']} · {det['n_flagged']} of {det['n_scored']} windows flagged",
+                        det.get("flagged_indices") or [], "flagged",
+                    )
+                    st.pyplot(fig, width="stretch")
+                    plt.close(fig)
         if report_body["llm_report"]:
+            def format_report(text: str) -> str:
+                """Escape LLM text, then bold the label before the colon on each line (Status:, Accuracy:, ...)."""
+                out = []
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    label, sep, rest = line.partition(":")
+                    if sep and 0 < len(label) <= 20:
+                        out.append(f"<b>{html.escape(label.strip())}:</b> {html.escape(rest.strip())}")
+                    else:
+                        out.append(html.escape(line))
+                return "<br>".join(out)
+
             st.markdown(
                 f'<div class="card-title">operator report</div>'
                 f'<div class="card-sub" style="opacity:0.85;margin-top:6px;line-height:1.5;">'
-                f'{report_body["llm_report"]}</div>',
+                f'{format_report(report_body["llm_report"])}</div>',
                 unsafe_allow_html=True,
             )
             if report_body["llm_severity"]:
                 sev = report_body["llm_severity"]
                 st.markdown(
                     f'<div class="card-sub" style="margin-top:10px;">'
-                    f'<b>llm severity:</b> {sev.get("severity", "unknown")} — {sev.get("reasoning", "")}</div>',
+                    f'<b>llm severity:</b> {html.escape(str(sev.get("severity", "unknown")))} — '
+                    f'{html.escape(str(sev.get("reasoning", "")))}</div>',
                     unsafe_allow_html=True,
                 )
         else:
@@ -831,8 +898,11 @@ if is_navic and len(satellites) > 1:
             st.caption(f"I{int(sid):02d}")
             if t_status == 200 and t_body["rows"]:
                 sat_df = pd.DataFrame(t_body["rows"])
+                # change from the first sample, in ns, so differences are visible
+                # (absolute bias is ~500 us and looks flat on a zero-based axis)
+                bias_ns = (sat_df["clock_bias_s"] - sat_df["clock_bias_s"].iloc[0]) * 1e9
                 st.pyplot(
-                    pudding_plot(sat_df["clock_bias_s"] * 1e6, "μs", compare_colors[i % len(compare_colors)]),
+                    pudding_plot(bias_ns, "ns from first sample", compare_colors[i % len(compare_colors)]),
                     width="stretch",
                 )
             else:
