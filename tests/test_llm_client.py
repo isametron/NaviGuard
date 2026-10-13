@@ -22,6 +22,59 @@ def test_client_raises_unavailable_when_server_unreachable():
         client.chat("system", "user")
 
 
+def _scripted_client(monkeypatch, outcomes):
+    """An LMStudioClient whose completions endpoint replays `outcomes` (exceptions or reply text)."""
+    import types
+
+    import naviguard.llm.client as client_mod
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
+    client = LMStudioClient(LLMSettings(base_url="http://localhost:1/v1"))
+    calls = []
+
+    def create(**kw):
+        calls.append(kw)
+        out = outcomes[min(len(calls), len(outcomes)) - 1]
+        if isinstance(out, Exception):
+            raise out
+        msg = types.SimpleNamespace(content=out)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    client._client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+    return client, calls
+
+
+def _server_error():
+    import httpx
+    from openai import InternalServerError
+    req = httpx.Request("POST", "http://localhost:1/v1/chat/completions")
+    return InternalServerError("<html>Internal Server Error</html>", response=httpx.Response(500, request=req),
+                               body=None)
+
+
+def test_chat_retries_a_server_error_while_the_model_loads(monkeypatch):
+    client, calls = _scripted_client(monkeypatch, [_server_error(), _server_error(), "Status: ok"])
+    assert client.chat("system", "user") == "Status: ok"
+    assert len(calls) == 3
+
+
+def test_chat_gives_up_on_persistent_server_errors_with_a_clean_message(monkeypatch):
+    client, calls = _scripted_client(monkeypatch, [_server_error()])
+    with pytest.raises(LMStudioUnavailableError, match="server error") as exc:
+        client.chat("system", "user")
+    assert len(calls) == 3 and "<html>" not in str(exc.value)
+
+
+def test_chat_reports_a_timeout_as_a_timeout_and_does_not_retry(monkeypatch):
+    import httpx
+    from openai import APITimeoutError
+    timeout = APITimeoutError(request=httpx.Request("POST", "http://localhost:1/v1/chat/completions"))
+    client, calls = _scripted_client(monkeypatch, [timeout])
+    with pytest.raises(LMStudioUnavailableError, match="timed out"):
+        client.chat("system", "user")
+    assert len(calls) == 1
+
+
 class FakeClient:
     def __init__(self, response: str):
         self._response = response

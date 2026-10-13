@@ -8,9 +8,14 @@ caller: any connectivity/timeout/API failure is normalized into
 LMStudioUnavailableError so callers can degrade gracefully.
 """
 
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
+import time
+
+from openai import APIConnectionError, APIError, APITimeoutError, InternalServerError, OpenAI
 
 from naviguard.config import LLMSettings
+
+# LM Studio answers 500 for a moment while it is (re)loading a model; a short wait usually clears it.
+SERVER_ERROR_RETRY_DELAYS_S = (2.0, 5.0)
 
 
 class LMStudioUnavailableError(RuntimeError):
@@ -27,7 +32,7 @@ class LMStudioClient:
             # Local inference latency is roughly constant, not transient
             # network flakiness — retrying won't make a slow generation
             # faster, it just multiplies wall-clock time before the caller
-            # finds out. Fail once, at the configured timeout.
+            # finds out. Fail once, at the configured timeout. (Fast 5xx errors are retried in chat().)
             max_retries=0,
         )
 
@@ -40,6 +45,22 @@ class LMStudioClient:
             return False
 
     def chat(self, system: str, user: str, temperature: float | None = None) -> str:
+        for delay in (*SERVER_ERROR_RETRY_DELAYS_S, None):
+            try:
+                return self._complete(system, user, temperature)
+            except InternalServerError as e:
+                # Unlike timeouts, a 5xx comes back fast and is usually transient (model loading).
+                if delay is not None:
+                    time.sleep(delay)
+                    continue
+                raise LMStudioUnavailableError(
+                    f"LM Studio at {self.settings.base_url} returned a server error for model "
+                    f"'{self.settings.model}' ({e.status_code}), even after retrying. It may still be "
+                    "loading the model — try again in a few seconds."
+                ) from e
+        raise AssertionError("unreachable")
+
+    def _complete(self, system: str, user: str, temperature: float | None) -> str:
         try:
             resp = self._client.chat.completions.create(
                 model=self.settings.model,
@@ -51,16 +72,18 @@ class LMStudioClient:
                 ],
             )
             return resp.choices[0].message.content or ""
+        except APITimeoutError as e:                  # subclass of APIConnectionError: must come first
+            raise LMStudioUnavailableError(
+                f"LM Studio at {self.settings.base_url} timed out after {self.settings.timeout_s}s. "
+                "The local model may be slow to generate — try again, or increase LLM_TIMEOUT_S."
+            ) from e
         except APIConnectionError as e:
             raise LMStudioUnavailableError(
                 f"LM Studio not reachable at {self.settings.base_url}. "
                 "Start LM Studio, load a model, and start the local server (Developer tab -> Start Server)."
             ) from e
-        except APITimeoutError as e:
-            raise LMStudioUnavailableError(
-                f"LM Studio at {self.settings.base_url} timed out after {self.settings.timeout_s}s. "
-                "The local model may be slow to generate — try again, or increase LLM_TIMEOUT_S."
-            ) from e
+        except InternalServerError:
+            raise                                     # retried by chat()
         except APIError as e:
             # The server responded, so it's reachable — the request itself was rejected
             # (most commonly: LLM_MODEL doesn't match a model actually loaded in LM Studio).

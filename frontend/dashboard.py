@@ -20,6 +20,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -207,11 +208,33 @@ def metric_card(meta_l: str, meta_r: str, bg: str, value: str, title: str, subti
     """
 
 
-def pudding_plot(series, ylabel: str, bg: str, line_color: str = INK):
+def broadcast_deviation_ns(df: pd.DataFrame) -> tuple[pd.Series, list[int]]:
+    """Real clock bias minus the line its own broadcast drift (af1) predicts, in ns from the first row.
+
+    It would stay at 0 if af1 explained every step; routine ground-segment refits show up as steps.
+    Also returns the rows whose single-step miss exceeds 4 robust sigmas (a local display rule; the
+    anomaly report below does the actual refit/fault classification).
+    """
+    bias_ns = df["clock_bias_s"].to_numpy(dtype=float) * 1e9
+    predicted = df["clock_drift_s_per_s"].to_numpy(dtype=float)[:-1] * np.diff(df["timestamp_s"].to_numpy(dtype=float))
+    miss = np.diff(bias_ns) - predicted * 1e9
+    deviation = pd.Series(np.r_[0.0, np.cumsum(miss)])
+    if len(miss) < 3:
+        return deviation, []
+    center = np.median(miss)
+    sigma = 1.4826 * np.median(np.abs(miss - center))
+    jumps = (np.flatnonzero(np.abs(miss - center) > 4 * sigma) + 1).tolist() if sigma > 0 else []
+    return deviation, jumps
+
+
+def pudding_plot(series, ylabel: str, bg: str, line_color: str = INK, marks=None, marks_label: str = ""):
     fig, ax = plt.subplots(figsize=(5.4, 2.7), facecolor=bg)
     ax.set_facecolor(bg)
     ax.plot(series.values, color=line_color, lw=2.2, solid_capstyle="round")
     ax.fill_between(range(len(series)), series.values, alpha=0.14, color=line_color)
+    if marks:
+        ax.scatter(marks, series.values[marks], color="#6f6f6f", s=26, zorder=3, label=marks_label)
+        ax.legend(fontsize=7, frameon=False, labelcolor=INK, loc="best")
     ax.set_xlabel("sample", fontsize=8, color=INK, alpha=0.45)
     ax.set_ylabel(ylabel, fontsize=8, color=INK, alpha=0.45)
     ax.tick_params(colors=INK, labelsize=7, length=0)
@@ -509,15 +532,25 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown(
         f'<div class="chart-wrap" style="background:{CARD_SKY};color:{INK};">'
-        f'<div class="card-meta"><span>live</span><span>navic</span></div>',
+        f'<div class="card-meta"><span>live</span><span>{sat_label}</span></div>',
         unsafe_allow_html=True,
     )
-    st.pyplot(pudding_plot(df["clock_bias_s"] * 1e6, "μs", CARD_SKY), width="stretch")
+    if is_navic:
+        # The raw bias (~580 µs) climbs only a few µs per window and plots as a flat line. Show what the
+        # broadcast drift next to it does not explain instead: the clock minus its own af1 line.
+        deviation, jumps = broadcast_deviation_ns(df)
+        st.pyplot(pudding_plot(deviation, "ns", CARD_SKY, marks=jumps, marks_label=f"jumps > 4σ ({len(jumps)})"),
+                  width="stretch")
+        bias_title = "clock vs broadcast drift"
+        bias_sub = "how far the real clock wanders from what its broadcast drift predicts"
+    else:
+        st.pyplot(pudding_plot(df["clock_bias_s"] * 1e6, "μs", CARD_SKY), width="stretch")
+        bias_title, bias_sub = "clock bias", "satellite oscillator offset over time"
     st.markdown(
         f"""
         <div class="chart-footer" style="color:{INK};">
-            <div class="card-title">clock bias</div>
-            <div class="card-sub">satellite oscillator offset over time</div>
+            <div class="card-title">{bias_title}</div>
+            <div class="card-sub">{bias_sub}</div>
         </div></div>
         """,
         unsafe_allow_html=True,

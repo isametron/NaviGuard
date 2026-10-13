@@ -1,7 +1,5 @@
 """naviguard.api.routes.anomaly — residual anomaly detection + optional local-LLM report/severity."""
 
-from concurrent.futures import ThreadPoolExecutor
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from naviguard.api.schemas import AnomalyReportRequest, AnomalyReportResponse, EvaluateResponse
@@ -48,15 +46,13 @@ def anomaly_report(
     llm_status = "not requested"
 
     if req.include_llm:
-        # The LLM is told about the detector's verdict but never asked to
-        # compute anything; the two calls are independent, so run them together.
+        # The LLM is told about the detector's verdict but never asked to compute
+        # anything. The two calls run one after the other: two simultaneous requests
+        # while LM Studio is still loading the model make it fail with a 500.
         stats = {**result, "detection": detection, "context": _llm_context(artifacts, req.satellite_id)}
         try:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                report_f = pool.submit(generate_operator_report, stats)
-                severity_f = pool.submit(assess_anomaly_severity, stats)
-                llm_report = report_f.result()
-                llm_severity = severity_f.result()
+            llm_report = generate_operator_report(stats)
+            llm_severity = assess_anomaly_severity(stats)
             llm_status = "ok"
         except LMStudioUnavailableError as e:
             llm_report, llm_severity = None, None
