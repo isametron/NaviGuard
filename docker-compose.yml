@@ -1,0 +1,50 @@
+# NaviGuard: API + dashboard from one image.
+#
+#   docker compose build
+#   docker compose run --rm api naviguard fetch --days 60     # once: download real NavIC data
+#   docker compose run --rm api naviguard train-navic         # once: train and save the model
+#   docker compose up                                         # API :8000, dashboard :8501
+#
+# LM Studio is NOT containerised: run it on your machine (server on port 1234). The containers
+# reach it through host.docker.internal.
+
+x-naviguard: &naviguard
+  build: .
+  image: naviguard:latest
+  volumes:
+    - ./data:/app/data
+    - ./models:/app/models
+    - ./outputs:/app/outputs
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # needed on Linux; harmless on Docker Desktop
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *naviguard
+    command: naviguard serve --host 0.0.0.0 --port 8000
+    environment:
+      NAVIGUARD_PROFILE: ${NAVIGUARD_PROFILE:-navic}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+      start_period: 90s   # TensorFlow import is slow on first start
+
+  dashboard:
+    <<: *naviguard
+    command: >
+      streamlit run frontend/dashboard.py
+      --server.address=0.0.0.0 --server.port=8501
+      --server.headless=true --browser.gatherUsageStats=false
+    environment:
+      NAVIGUARD_API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
