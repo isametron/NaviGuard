@@ -115,7 +115,7 @@ NaviGuard/
 │   ├── cli.py                         # `naviguard <subcommand>` entry point
 │   ├── data/
 │   │   ├── generate.py                # synthetic telemetry (+ labelled anomaly injection)
-│   │   └── broadcast.py               # real NavIC data: download + RINEX parse (DLR BRDM via BKG)
+│   │   └── broadcast.py               # real NavIC data: download + RINEX parse (DLR BRDM via BKG or ESA)
 │   ├── preprocessing/sequences.py     # scaling, per-satellite chronological split, windowing (synthetic profile)
 │   ├── models/                        # attention-LSTM layers + training (synthetic profile)
 │   ├── baselines.py                   # persistence / linear / ridge (synthetic profile)
@@ -171,6 +171,22 @@ pip install -e ".[frontend]"
 streamlit run frontend/dashboard.py    # http://localhost:8501; set NAVIGUARD_API_URL if the API is elsewhere
 ```
 
+### C. Docker
+
+One image runs both services (`docker-compose.yml`); `data/` and `models/` are shared with your
+machine, so existing data and a trained model are used as they are.
+
+```bash
+docker compose build
+docker compose up                      # API :8000, dashboard :8501
+```
+
+LM Studio stays on your machine; the containers reach it at `host.docker.internal:1234`. The compose file
+passes `NAVIGUARD_PROFILE` (default `navic`), `LLM_MODEL` (default `qwen2.5-7b-instruct`),
+`LLM_TEMPERATURE` (default 0.3) and `NAVIGUARD_SOURCE` through from your environment. Without data or a
+model yet, run `docker compose run --rm api naviguard fetch --start 2026-07-15 --end 2026-09-21` and
+then `... naviguard train-navic` once.
+
 ### CLI reference
 
 | command                            | purpose                                                                                                       |
@@ -178,7 +194,7 @@ streamlit run frontend/dashboard.py    # http://localhost:8501; set NAVIGUARD_AP
 | `generate`                         | synthetic telemetry (`--n-satellites`, `--anomaly-count` injects labelled faults in the test region)          |
 | `preprocess` / `train` / `predict` | synthetic-profile pipeline (70/15/15 split, val-based early stopping, baselines, anomaly scan)                |
 | `pipeline`                         | generate → preprocess → train → predict                                                                       |
-| `fetch`                            | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`)             |
+| `fetch`                            | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`, `--source`) |
 | `coverage`                         | per-satellite sample/gap summary and gap-aware eligibility by forecast horizon                                |
 | `train-navic`                      | train + select a model on real data for the `navic` profile                                                   |
 | `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`, `--extend`) |
@@ -209,6 +225,11 @@ every 15 min (912 s), so af0 at each epoch is a per-satellite clock-bias series.
 keeps the drift (af1), URA index, health flag and TGD. Only the extracted IRNSS rows are cached
 (~1 MB for 68 days). Downloads have a hard per-file deadline and retries; failed days are skipped and
 reported.
+
+The same file is mirrored by ESA's GNSS data centre, with identical records. `--source` (or the
+`NAVIGUARD_SOURCE` environment variable) picks the mirror: `bkg`, `esa`, or `auto` (the default), which
+tries BKG and, once BKG is unreachable, uses ESA first for the rest of the run. The fetch log reports
+how many days came from each mirror.
 
 **Synthetic.** 24 h clock-bias sinusoid + random-walk wander + noise, cosine drift, 12 h ephemeris
 sinusoid; optional labelled anomalies (spike, drift excursion, ephemeris jump) in the test region.
@@ -332,7 +353,8 @@ Clock-bias prediction with recurrent networks is an active area (verify details 
 Done: cross-satellite pooled models, the 24 h (96-step) horizon, per-satellite coverage reports,
 block-bootstrap confidence intervals for model comparisons, and a refit-aware anomaly detector that
 separates routine ground-segment refits from faults (~95% fewer false alarms; in `anomaly-eval` and
-`/anomaly-report`), and a two-state Kalman-filter clock baseline.
+`/anomaly-report`), a two-state Kalman-filter clock baseline, Docker (API + dashboard via docker
+compose), and a BKG/ESA mirror switch for downloads.
 
 In progress: six-month dataset (Apr–Sep 2026).
 
@@ -346,7 +368,7 @@ Next:
   archive changes.
 - A short guide to adding a new forecaster or detector, with config-driven experiments.
 - Lower-latency data sources (CDDIS sub-hourly IRNSS files, real-time streams, or a NavIC receiver),
-  scheduled data refresh and retraining; Docker.
+  scheduled data refresh and retraining.
 
 ---
 

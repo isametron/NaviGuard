@@ -1,7 +1,7 @@
 """naviguard.data.broadcast — real NavIC (IRNSS) broadcast clock data.
 
 Public source: the multi-GNSS broadcast-ephemeris product BRDM00DLR (DLR/GSOC,
-RINEX 3.04, ~1.4 MB gzipped per day) mirrored at BKG. Each IRNSS navigation
+RINEX 3.04, ~1.4 MB gzipped per day) mirrored at BKG and ESA. Each IRNSS navigation
 record carries the satellite's own clock polynomial (af0, af1, af2) at its
 reference epoch `toc`; for the continuously tracked satellites a new record
 arrives every ~15 minutes, so af0 at each `toc` is directly a per-satellite
@@ -19,6 +19,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -27,8 +28,14 @@ import pandas as pd
 from naviguard.config import DATA_DIR
 
 RAW_DIR = os.path.join(DATA_DIR, "raw")
-BRDM_URL = ("https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/"
-            "BRDM00DLR_S_{year}{doy:03d}0000_01D_MN.rnx.gz")
+_BRDM_FILE = "BRDM00DLR_S_{year}{doy:03d}0000_01D_MN.rnx.gz"
+# The same DLR product at two IGS data centres. Their IRNSS records are identical (checked on
+# 2026-08-01), so switching mirrors never changes results.
+MIRRORS = {
+    "bkg": "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/" + _BRDM_FILE,
+    "esa": "ftp://gssc.esa.int/gnss/data/daily/{year}/brdc/" + _BRDM_FILE,
+}
+SOURCES = ("auto", *MIRRORS)    # auto: BKG first, ESA first for the rest of a run once BKG is down
 _USER_AGENT = "naviguard/0.3 (research; contact via repo)"
 _RECORD_LINES = 8     # IRNSS record = epoch/clock line + 7 broadcast-orbit lines
 
@@ -94,52 +101,95 @@ def _download(url: str, dest: str, timeout_s: float, deadline_s: float) -> None:
     os.replace(dest + ".part", dest)
 
 
+def _missing(err: Exception) -> bool:
+    """The server answered but has no file for that day: another mirror may, but this one isn't down."""
+    if isinstance(err, urllib.error.HTTPError):
+        return err.code == 404
+    return "550" in str(getattr(err, "reason", err))          # FTP "file unavailable"
+
+
+def _download_with_retries(url: str, dest: str, timeout_s: float, deadline_s: float, retries: int) -> None:
+    last_err: Exception = RuntimeError("no download attempted")
+    for _ in range(max(1, retries)):
+        try:
+            _download(url, dest, timeout_s, deadline_s)
+            return
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_err = e
+            if os.path.exists(dest + ".part"):
+                os.remove(dest + ".part")
+            if _missing(e):
+                break                                  # not published (yet): retrying won't help
+    raise last_err
+
+
 def fetch_day(day: date, cache_dir: str = RAW_DIR, keep_raw: bool = False, force: bool = False,
-              timeout_s: float = 30.0, deadline_s: float = 90.0, retries: int = 2) -> pd.DataFrame:
-    """Return the IRNSS records for one UTC day, downloading + caching if needed."""
+              timeout_s: float = 30.0, deadline_s: float = 90.0, retries: int = 2,
+              mirrors: tuple[str, ...] = tuple(MIRRORS), on_down=None) -> pd.DataFrame:
+    """Return the IRNSS records for one UTC day, downloading + caching if needed.
+
+    Mirrors are tried in order. `on_down(name, error)` is called when a mirror is unreachable
+    (as opposed to merely missing that day's file). The returned frame's attrs["source"] names
+    the mirror that served it, or "cache".
+    """
     os.makedirs(cache_dir, exist_ok=True)
     csv_path = _day_csv(day, cache_dir)
     if os.path.exists(csv_path) and not force:
-        return pd.read_csv(csv_path, parse_dates=["toc"])
+        df = pd.read_csv(csv_path, parse_dates=["toc"])
+        df.attrs["source"] = "cache"
+        return df
 
-    url = BRDM_URL.format(year=day.year, doy=day.timetuple().tm_yday)
-    gz_path = os.path.join(cache_dir, os.path.basename(url))
-    last_err: Exception | None = None
-    for _ in range(retries):
+    errors = []
+    for name in mirrors:
+        url = MIRRORS[name].format(year=day.year, doy=day.timetuple().tm_yday)
+        gz_path = os.path.join(cache_dir, os.path.basename(url))
         try:
-            _download(url, gz_path, timeout_s, deadline_s)
-            break
+            _download_with_retries(url, gz_path, timeout_s, deadline_s, retries)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            last_err = e
-            if os.path.exists(gz_path + ".part"):
-                os.remove(gz_path + ".part")
-            if isinstance(e, urllib.error.HTTPError) and e.code == 404:
-                break                                  # file not published (yet) — retrying won't help
-    else:
-        last_err = last_err or RuntimeError("unknown")
-    if not os.path.exists(gz_path):
-        raise BroadcastFetchError(f"could not fetch {url}: {last_err}") from last_err
-
-    with gzip.open(gz_path, "rt", encoding="ascii", errors="replace") as f:
-        df = parse_irnss_records(f)
-    df.to_csv(csv_path, index=False)
-    if not keep_raw:
-        os.remove(gz_path)
-    return df
+            errors.append(f"{name}: {e}")
+            if on_down is not None and not _missing(e):
+                on_down(name, e)
+            continue
+        with gzip.open(gz_path, "rt", encoding="ascii", errors="replace") as f:
+            df = parse_irnss_records(f)
+        df.to_csv(csv_path, index=False)
+        if not keep_raw:
+            os.remove(gz_path)
+        df.attrs["source"] = name
+        return df
+    raise BroadcastFetchError(f"could not fetch {day} ({'; '.join(errors)})")
 
 
 def fetch_range(start: date, end: date, cache_dir: str = RAW_DIR, keep_raw: bool = False,
-                force: bool = False) -> tuple[pd.DataFrame, list[date]]:
-    """Fetch [start, end] inclusive. Days that fail are returned (not fatal)."""
-    frames, failed = [], []
+                force: bool = False, source: str = "auto") -> tuple[pd.DataFrame, list[date]]:
+    """Fetch [start, end] inclusive. Days that fail are returned (not fatal).
+
+    source: "bkg" or "esa" downloads only from that mirror; "auto" tries BKG first and, as soon
+    as a mirror turns out to be unreachable, tries the other one first for the rest of the range,
+    so a dead mirror costs one timeout rather than one per day.
+    """
+    if source not in SOURCES:
+        raise ValueError(f"unknown source {source!r}; choose from {', '.join(SOURCES)}")
+    order = list(MIRRORS) if source == "auto" else [source]
+
+    def demote(name, err):
+        if len(order) > 1 and order[0] == name:
+            order.append(order.pop(0))
+            print(f"[fetch] {name.upper()} unreachable ({err}); trying {order[0].upper()} first from now on")
+
+    frames, failed, used = [], [], Counter()
     day = start
     while day <= end:
         try:
-            frames.append(fetch_day(day, cache_dir, keep_raw, force))
+            df = fetch_day(day, cache_dir, keep_raw, force, mirrors=tuple(order), on_down=demote)
+            frames.append(df)
+            used[df.attrs.get("source", "?")] += 1
         except BroadcastFetchError as e:
-            print(f"[fetch] {day}: {e}")
+            print(f"[fetch] {e}")
             failed.append(day)
         day += timedelta(days=1)
+    if used:
+        print("[fetch] days by source: " + ", ".join(f"{k} {n}" for k, n in sorted(used.items())))
     if not frames:
         raise BroadcastFetchError(f"no data fetched for {start}..{end}")
     df = pd.concat(frames, ignore_index=True)

@@ -1,9 +1,13 @@
 # NaviGuard: API + dashboard from one image.
 #
 #   docker compose build
-#   docker compose run --rm api naviguard fetch --days 60     # once: download real NavIC data
-#   docker compose run --rm api naviguard train-navic         # once: train and save the model
 #   docker compose up                                         # API :8000, dashboard :8501
+#
+# data/ and models/ are shared with your machine. If data/navic_telemetry.csv and models/navic/
+# already exist, skip the next two steps. Otherwise run them once; these dates reproduce the
+# published benchmark, while --days would fetch the latest days and replace that dataset:
+#   docker compose run --rm api naviguard fetch --start 2026-07-15 --end 2026-09-21
+#   docker compose run --rm api naviguard train-navic
 #
 # LM Studio is NOT containerised: run it on your machine (server on port 1234). The containers
 # reach it through host.docker.internal.
@@ -25,7 +29,10 @@ services:
     command: naviguard serve --host 0.0.0.0 --port 8000
     environment:
       NAVIGUARD_PROFILE: ${NAVIGUARD_PROFILE:-navic}
+      NAVIGUARD_SOURCE: ${NAVIGUARD_SOURCE:-auto}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-7b-instruct}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.3}
     ports:
       - "8000:8000"
     healthcheck:

@@ -1,8 +1,14 @@
-"""Tests for the RINEX IRNSS broadcast-clock parser (hermetic — no network)."""
+"""Tests for the RINEX IRNSS broadcast-clock parser and mirror switching (hermetic — no network)."""
+
+import gzip
+import urllib.error
+from datetime import date
 
 import numpy as np
+import pytest
 
-from naviguard.data.broadcast import parse_irnss_records, to_telemetry
+from naviguard.data import broadcast
+from naviguard.data.broadcast import BroadcastFetchError, fetch_range, parse_irnss_records, to_telemetry
 
 HEADER = "     3.04           NAVIGATION DATA     M                   RINEX VERSION / TYPE\n" \
          "                                                            END OF HEADER\n"
@@ -71,3 +77,61 @@ def test_to_telemetry_drops_sparse_satellites_and_indexes_samples():
     assert set(tel["satellite_id"]) == {2}
     assert list(tel["sample_id"]) == [0, 1]
     assert tel["timestamp_s"].iloc[1] == 912
+
+
+# ── mirror switching ──────────────────────────────────────────────────────────
+DAYS = (date(2026, 8, 1), date(2026, 8, 3))
+
+
+def _fake_mirrors(monkeypatch, down=(), missing=()):
+    """Replace downloads: mirrors in `down` time out, (mirror, day-of-year) pairs in `missing` 404."""
+    calls = []
+
+    def fake_download(url, dest, timeout_s, deadline_s):
+        name = "bkg" if "bkg.bund.de" in url else "esa"
+        doy = int(url.rsplit("_S_", 1)[1][4:7])
+        calls.append((name, doy))
+        if name in down:
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        if (name, doy) in missing:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        with gzip.open(dest, "wt", encoding="ascii") as f:
+            f.write(HEADER + I02_A.replace("2026 01 01", f"2026 08 {doy - 212:02d}"))
+
+    monkeypatch.setattr(broadcast, "_download", fake_download)
+    return calls
+
+
+def test_auto_switches_to_esa_once_bkg_is_down_and_stays_there(monkeypatch, tmp_path, capsys):
+    calls = _fake_mirrors(monkeypatch, down={"bkg"})
+    records, failed = fetch_range(*DAYS, cache_dir=str(tmp_path))
+    assert failed == [] and len(records) == 3
+    assert [c for c in calls if c[0] == "bkg"] == [("bkg", 213), ("bkg", 213)]   # one day's retries, then never again
+    assert "esa 3" in capsys.readouterr().out
+
+
+def test_fixed_source_never_falls_back(monkeypatch, tmp_path):
+    calls = _fake_mirrors(monkeypatch, down={"bkg"})
+    with pytest.raises(BroadcastFetchError, match="no data fetched"):
+        fetch_range(*DAYS, cache_dir=str(tmp_path), source="bkg")
+    assert {c[0] for c in calls} == {"bkg"}
+    calls.clear()
+    records, failed = fetch_range(*DAYS, cache_dir=str(tmp_path), source="esa")
+    assert failed == [] and {c[0] for c in calls} == {"esa"}
+
+
+def test_a_missing_file_borrows_from_the_other_mirror_without_switching(monkeypatch, tmp_path, capsys):
+    calls = _fake_mirrors(monkeypatch, missing={("bkg", 213)})
+    fetch_range(*DAYS, cache_dir=str(tmp_path))
+    assert calls == [("bkg", 213), ("esa", 213), ("bkg", 214), ("bkg", 215)]
+    assert "bkg 2, esa 1" in capsys.readouterr().out
+
+
+def test_cached_days_need_no_mirror_and_unknown_source_is_rejected(monkeypatch, tmp_path):
+    _fake_mirrors(monkeypatch)
+    fetch_range(*DAYS, cache_dir=str(tmp_path))
+    calls = _fake_mirrors(monkeypatch, down={"bkg", "esa"})
+    records, failed = fetch_range(*DAYS, cache_dir=str(tmp_path))
+    assert failed == [] and calls == []
+    with pytest.raises(ValueError, match="unknown source"):
+        fetch_range(*DAYS, cache_dir=str(tmp_path), source="cddis")

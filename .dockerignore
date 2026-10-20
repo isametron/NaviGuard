@@ -1,6 +1,7 @@
 .git
 .github
-.venv
+.venv*
+.claude
 venv
 env
 tf_env

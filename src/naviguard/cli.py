@@ -87,7 +87,8 @@ def _cmd_fetch(args):
     start = date.fromisoformat(args.start) if args.start else end - timedelta(days=args.days - 1)
     if start > end:
         raise ValueError(f"fetch start date {start} must be on or before end date {end}")
-    records, failed = fetch_range(start, end, keep_raw=args.keep_raw, force=args.force)
+    print(f"[fetch] source: {args.source}")
+    records, failed = fetch_range(start, end, keep_raw=args.keep_raw, force=args.force, source=args.source)
     tel = to_telemetry(records, min_records=args.min_records)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     tel.to_csv(args.out, index=False)
@@ -263,6 +264,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--out", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
     p_fetch.add_argument("--keep-raw", action="store_true", dest="keep_raw")
     p_fetch.add_argument("--force", action="store_true")
+    p_fetch.add_argument("--source", choices=("auto", "bkg", "esa"), default=os.environ.get("NAVIGUARD_SOURCE", "auto"),
+                         help="download mirror: bkg, esa, or auto (BKG, switching to ESA if it is down); "
+                              "default from NAVIGUARD_SOURCE, else auto")
     p_fetch.set_defaults(func=_cmd_fetch)
 
     p_cov = sub.add_parser("coverage", help="Report per-satellite sample coverage, gaps, and horizon eligibility")
