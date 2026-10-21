@@ -180,9 +180,19 @@ class RidgeDirect(Forecaster):
 
 
 class Neural(Forecaster):
-    def __init__(self, kind, horizon, seed=0, epochs=60, patience=8, batch=64):
+    """Two-layer LSTM / GRU, optionally with attention pooling. The defaults are the untuned
+    configuration used in the published benchmark; `naviguard tune` searches the others.
+
+    lookback: use only the last `lookback` records of each window (None = all), so the input length
+    can be tuned without changing the windows every model is evaluated on.
+    """
+
+    def __init__(self, kind, horizon, seed=0, epochs=60, patience=8, batch=64, units=(64, 32), dropout=0.2,
+                 lr=1e-3, dense=16, lookback=None):
         self.kind, self.h, self.seed = kind, horizon, seed
         self.epochs, self.patience, self.batch = epochs, patience, batch
+        self.units, self.dropout, self.lr, self.dense = tuple(units), dropout, lr, dense
+        self.lookback = lookback
         self.name = kind
 
     def _build(self, L, F):
@@ -190,30 +200,35 @@ class Neural(Forecaster):
 
         from naviguard.models.attention import AttentionPooling
         K = tf.keras.layers
+        u1, u2 = self.units
         inp = tf.keras.Input((L, F))
         if self.kind == "gru":
-            x = K.GRU(64, return_sequences=True)(inp)
-            x = K.Dropout(0.2)(x)
-            x = K.GRU(32)(x)
+            x = K.GRU(u1, return_sequences=True)(inp)
+            x = K.Dropout(self.dropout)(x)
+            x = K.GRU(u2)(x)
         else:
-            x = K.LSTM(64, return_sequences=True)(inp)
-            x = K.Dropout(0.2)(x)
+            x = K.LSTM(u1, return_sequences=True)(inp)
+            x = K.Dropout(self.dropout)(x)
             if self.kind == "attn_lstm":
-                x = K.LSTM(32, return_sequences=True)(x)
-                x = K.Dropout(0.2)(x)
-                x = AttentionPooling(32)(x)
+                x = K.LSTM(u2, return_sequences=True)(x)
+                x = K.Dropout(self.dropout)(x)
+                x = AttentionPooling(u2)(x)
             else:
-                x = K.LSTM(32)(x)
-        x = K.Dense(16, activation="relu")(x)
+                x = K.LSTM(u2)(x)
+        x = K.Dense(self.dense, activation="relu")(x)
         out = K.Dense(self.h)(x)
         m = tf.keras.Model(inp, out)
-        m.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss="mse")
+        m.compile(optimizer=tf.keras.optimizers.Adam(self.lr), loss="mse")
         return m
+
+    def _cut(self, X):
+        return X[:, -self.lookback:, :] if self.lookback else X
 
     def fit(self, X, y, Xv, yv):
         import tensorflow as tf
 
         tf.keras.utils.set_random_seed(self.seed)
+        X, Xv = self._cut(X), self._cut(Xv)
         self.mu = X.mean((0, 1))
         self.sd = X.std((0, 1)) + 1e-9
         self.ysd = y.std(0) + 1e-9
@@ -228,10 +243,15 @@ class Neural(Forecaster):
         return ((X - self.mu) / self.sd).astype(np.float32)
 
     def predict(self, X):
-        return self.model.predict(self._x(X), verbose=0) * self.ysd
+        return self.model.predict(self._x(self._cut(X)), verbose=0) * self.ysd
+
+
+TUNABLE = ("ridge", *NEURAL)     # models with settings for `naviguard tune`; the others have none
 
 
 def make_model(name: str, horizon: int, seed: int = 0, **kw) -> Forecaster:
+    if kw and name not in TUNABLE:
+        raise ValueError(f"{name} takes no settings (got {sorted(kw)}); tunable models: {TUNABLE}")
     if name == "persistence":
         return Persistence(horizon)
     if name == "broadcast_drift":
@@ -243,7 +263,7 @@ def make_model(name: str, horizon: int, seed: int = 0, **kw) -> Forecaster:
     if name == "kalman":
         return Kalman(horizon)
     if name == "ridge":
-        return RidgeDirect(horizon)
+        return RidgeDirect(horizon, **kw)
     if name in NEURAL:
         return Neural(name, horizon, seed=seed, **kw)
     raise ValueError(f"unknown model {name!r}; choose from {ALL_MODELS}")

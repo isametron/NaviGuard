@@ -197,7 +197,8 @@ then `... naviguard train-navic` once.
 | `fetch`                            | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`, `--source`) |
 | `coverage`                         | per-satellite sample/gap summary and gap-aware eligibility by forecast horizon                                |
 | `train-navic`                      | train + select a model on real data for the `navic` profile                                                   |
-| `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`, `--extend`) |
+| `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`, `--extend`, `--params`) |
+| `tune`                             | settings search for ridge and the neural models, using only data before the first test block (`--trials`, `--resume`) |
 | `anomaly-eval`                     | detector evaluation: injected faults + real events vs metadata                                                |
 | `report`                           | figures and LaTeX tables from benchmark/anomaly outputs                                                       |
 | `serve` / `clean`                  | run the API / remove generated artifacts                                                                      |
@@ -259,6 +260,18 @@ af0 resolution. The broadcast drift enters once, as a drift measurement at the f
 Feeding it in at every record would be wrong: af1 only changes at uploads, and each repeat would
 count as fresh evidence. The four variances are fitted by maximum likelihood on each fold's training
 windows.
+
+Tuning (`naviguard tune`): the benchmark's folds expand, so a later fold's training data is an earlier
+fold's test block. Tuning therefore uses only the windows before the first test block, runs the same
+rolling-origin scheme inside them, and scores each candidate on those held-out inner blocks (MAE
+relative to persistence, averaged over folds and satellites). Neural models get a random search over
+layer sizes, dropout, learning rate, batch size, dense units and look-back (the untuned default is
+always trial 0); ridge gets a grid over its regularisation strength. Settings are chosen per
+satellite, since each satellite's models are trained separately; averaging instead would let the
+satellite with the largest errors (I10) pick settings that hurt the clean one (I02). A setting
+averaged over satellites is kept for pooled models. `naviguard benchmark --params best.json` then
+runs the benchmark with the chosen settings. The untuned defaults reproduce the published results
+exactly.
 
 The `navic` profile trains broadcast-drift, ridge and attention-LSTM pooled across satellites and serves
 the one with the lowest **validation** MAE; test metrics for every candidate are recorded in

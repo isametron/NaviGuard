@@ -8,6 +8,7 @@ attention-LSTM against every other model, moving-block bootstrap 95% confidence 
 and intervals can be recomputed without retraining.
 """
 
+import json
 import os
 import time
 
@@ -99,8 +100,18 @@ def run_benchmark(
     epochs: int = 60,
     verbose: bool = True,
     resume: bool = False,
+    params: dict | None = None,
+    params_by_sat: dict | None = None,
 ) -> pd.DataFrame:
+    """params: tuned settings per model ({"attn_lstm": {...}, "ridge": {"alpha": ...}}, from
+    `naviguard tune`). params_by_sat: the same per satellite ({"2": {"attn_lstm": {...}}}), which
+    wins where present, since each satellite's models are trained separately. Models without an
+    entry use their defaults. Both are saved as params.json."""
     os.makedirs(out_dir, exist_ok=True)
+    params, params_by_sat = params or {}, {str(k): v for k, v in (params_by_sat or {}).items()}
+    if params or params_by_sat:
+        with open(os.path.join(out_dir, "params.json"), "w") as f:
+            json.dump({"models": params, "per_satellite": params_by_sat}, f, indent=2)
     series = load_series(csv_path)
     rows, dm_rows, ci_rows = [], [], []
     done: set[int] = set()
@@ -141,6 +152,7 @@ def run_benchmark(
                 fold_preds = []
                 for k, f in enumerate(folds):
                     kw = {"epochs": epochs} if name in NEURAL else {}
+                    kw.update(params_by_sat.get(str(sat), {}).get(name, params.get(name, {})))
                     m = make_model(name, horizon, seed=seed, **kw).fit(
                         w.X[f.train], w.y[f.train], w.X[f.val], w.y[f.val])
                     p = m.predict(w.X[f.test])
@@ -306,6 +318,7 @@ def run_pooled_benchmark(
     val_frac: float = 0.15,
     verbose: bool = True,
     resume: bool = False,
+    params: dict | None = None,
 ) -> pd.DataFrame:
     """Cross-satellite pooling: one model per model-type trained on the windows of *all*
     satellites, evaluated on each satellite's own test folds (identical to the per-satellite
@@ -356,6 +369,7 @@ def run_pooled_benchmark(
             for name in models:
                 for seed in range(seeds if name in NEURAL else 1):
                     kw = {"epochs": epochs} if name in NEURAL else {}
+                    kw.update((params or {}).get(name, {}))
                     m = make_model(name, horizon, seed=seed, **kw).fit(X[train], y[train], X[val], y[val])
                     rows += _error_rows(sat, k, f"{name}_pooled", seed, w.y[f.test] - m.predict(w.X[f.test]))
             if verbose:

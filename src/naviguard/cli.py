@@ -117,10 +117,12 @@ def _cmd_coverage(args):
 def _cmd_benchmark(args):
     from naviguard.benchmark.models import ALL_MODELS
     from naviguard.benchmark.run import extend_benchmark, run_benchmark, run_pooled_benchmark
+    from naviguard.benchmark.tune import load_params
 
+    params, params_by_sat = load_params(args.params, args.horizon, args.seq_len) if args.params else (None, None)
     if args.extend:
         if not args.models:
-            raise SystemExit("--extend needs --models, e.g. --models kalman,kalman_jump")
+            raise SystemExit("--extend needs --models, e.g. --models kalman")
         extend_benchmark(csv_path=args.csv, out_dir=args.out_dir, models=tuple(args.models.split(",")),
                          seq_len=args.seq_len, horizon=args.horizon, n_folds=args.folds)
         print(f"[benchmark] Added {args.models} to {args.out_dir} (other models not retrained)")
@@ -130,7 +132,7 @@ def _cmd_benchmark(args):
         run_pooled_benchmark(
             csv_path=args.csv, out_dir=args.out_dir, models=pooled_models, seq_len=args.seq_len,
             horizon=args.horizon, n_folds=args.folds, seeds=args.seeds,
-            min_windows=args.min_windows, epochs=args.epochs, resume=args.resume,
+            min_windows=args.min_windows, epochs=args.epochs, resume=args.resume, params=params,
         )
         print(f"[benchmark] Pooled rows merged into {args.out_dir}/results.csv (models suffixed _pooled)")
         return
@@ -139,10 +141,25 @@ def _cmd_benchmark(args):
         csv_path=args.csv, out_dir=args.out_dir,
         satellites=[int(s) for s in args.satellites.split(",")] if args.satellites else None,
         models=models, seq_len=args.seq_len, horizon=args.horizon, n_folds=args.folds,
-        seeds=args.seeds, min_windows=args.min_windows, epochs=args.epochs, resume=args.resume,
+        seeds=args.seeds, min_windows=args.min_windows, epochs=args.epochs, resume=args.resume, params=params,
+        params_by_sat=params_by_sat,
     )
     print(f"[benchmark] Results in {args.out_dir}  (results.csv, summary.md, summary.tex, dm_tests.csv)")
     print("[benchmark] ✓ Complete")
+
+
+def _cmd_tune(args):
+    from naviguard.benchmark.tune import run_tuning
+
+    result = run_tuning(csv_path=args.csv, out_dir=args.out_dir, models=tuple(args.models.split(",")),
+                        seq_len=args.seq_len, horizon=args.horizon, n_folds=args.folds, n_trials=args.trials,
+                        epochs=args.epochs, min_windows=args.min_windows, seed=args.seed, resume=args.resume)
+    print(f"[tune] Best settings (chosen before any test period) in {args.out_dir}/best.json; summary in summary.md")
+    for sat, chosen in result["per_satellite"].items():
+        for model, p in chosen.items():
+            print(f"[tune]   I{int(sat):02d} {model:<10} {p}")
+    print(f"[tune] Use them: naviguard benchmark --params {args.out_dir}/best.json "
+          f"--horizon {args.horizon} --seq-len {args.seq_len} ...")
 
 
 def _cmd_anomaly_eval(args):
@@ -295,7 +312,23 @@ def build_parser() -> argparse.ArgumentParser:
                          help="train one model on all satellites (merged into an existing --out-dir)")
     p_bench.add_argument("--extend", action="store_true",
                          help="add classical --models to a finished --out-dir without retraining the others")
+    p_bench.add_argument("--params", type=str, default=None,
+                         help="tuned settings (best.json from `naviguard tune`, same --horizon and --seq-len)")
     p_bench.set_defaults(func=_cmd_benchmark)
+
+    p_tune = sub.add_parser("tune", help="Search model settings using only data before the benchmark's test periods")
+    p_tune.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
+    p_tune.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "tuning"), dest="out_dir")
+    p_tune.add_argument("--models", type=str, default="ridge,attn_lstm,lstm,gru", help="comma-separated tunable models")
+    p_tune.add_argument("--seq-len", type=int, default=cfg.SEQ_LEN, dest="seq_len")
+    p_tune.add_argument("--horizon", type=int, default=cfg.HORIZON)
+    p_tune.add_argument("--folds", type=int, default=3)
+    p_tune.add_argument("--trials", type=int, default=20, help="settings tried per neural model (ridge: full grid)")
+    p_tune.add_argument("--epochs", type=int, default=40)
+    p_tune.add_argument("--min-windows", type=int, default=200, dest="min_windows")
+    p_tune.add_argument("--seed", type=int, default=0)
+    p_tune.add_argument("--resume", action="store_true", help="continue an interrupted run in --out-dir")
+    p_tune.set_defaults(func=_cmd_tune)
 
     p_anom = sub.add_parser("anomaly-eval", help="Evaluate anomaly detectors on real series (injected + real events)")
     p_anom.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
