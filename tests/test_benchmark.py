@@ -204,6 +204,9 @@ def test_benchmark_writes_predictions_and_bootstrap_cis(tmp_path):
     row = ci[(ci.model == "broadcast_drift") & (ci.step == 4)].iloc[0]
     assert row["value"] == pytest.approx(mae4, rel=1e-5)
     assert (out / "ci.md").exists()
+    assert len(z["fold"]) == len(z["y"]) and set(z["fold"]) == set(z["val_fold"]) == {0, 1}
+    assert z["val_broadcast_drift"].shape == z["val_y"].shape == (len(z["val_fold"]), 4)   # for range calibration
+    assert np.abs(z["val_y"] - z["val_broadcast_drift"]).mean() < np.abs(z["val_y"] - z["val_persistence"]).mean()
 
 
 def test_extend_benchmark_adds_a_model_without_retraining_the_others(tmp_path):
@@ -229,6 +232,7 @@ def test_extend_benchmark_adds_a_model_without_retraining_the_others(tmp_path):
     pd.testing.assert_frame_equal(res[res.model != "kalman"].reset_index(drop=True), before)
     with np.load(out / "predictions_I02.npz") as z:
         assert "kalman" in z.files and np.array_equal(z["broadcast_drift"], saved["broadcast_drift"])
+        assert z["val_kalman"].shape == z["val_y"].shape
     dm = pd.read_csv(out / "dm_tests.csv")
     assert set(dm["vs"]) == {"kalman"} and len(dm) == 2
     ci = pd.read_csv(out / "ci.csv")

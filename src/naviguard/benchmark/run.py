@@ -5,7 +5,8 @@ rolling-origin folds, and every model is fitted per fold (neural models over sev
 seeds). Outputs a tidy results CSV, a Markdown/LaTeX summary, Diebold–Mariano tests of the
 attention-LSTM against every other model, moving-block bootstrap 95% confidence intervals
 (ci.csv / ci.md), and the per-window test predictions (predictions_Ixx.npz) so the tests
-and intervals can be recomputed without retraining.
+and intervals can be recomputed without retraining. The npz also holds each fold's validation
+predictions (val_<model>, val_y, val_fold; test fold ids in `fold`) for calibrating forecast ranges.
 """
 
 import json
@@ -36,6 +37,10 @@ def _dm_rows(sat: int, y_test: np.ndarray, ref: np.ndarray, name: str, other: np
         stat, p = diebold_mariano(y_test[:, step] - ref[:, step], y_test[:, step] - other[:, step], horizon=step + 1)
         rows.append(dict(satellite=sat, vs=name, step=step + 1, dm_stat=stat, p_value=p))
     return rows
+
+
+def _fold_ids(folds, part: str) -> np.ndarray:
+    return np.concatenate([np.full(len(getattr(f, part)), k) for k, f in enumerate(folds)])
 
 
 def bootstrap_ci_rows(sat: int, y_test: np.ndarray, ens: dict[str, np.ndarray], horizon: int,
@@ -142,14 +147,15 @@ def run_benchmark(
         test_idx = np.concatenate([f.test for f in folds])
         y_test = w.y[test_idx]
         preds: dict[str, list[np.ndarray]] = {}
+        val_preds: dict[str, list[np.ndarray]] = {}
         if verbose:
             print(f"[bench] I{sat:02d}: {len(w.i)} windows, {n_folds} folds, {len(test_idx)} test windows")
 
         for name in models:
             n_seed = seeds if name in NEURAL else 1
-            per_seed = []
+            per_seed, per_seed_val = [], []
             for seed in range(n_seed):
-                fold_preds = []
+                fold_preds, fold_val = [], []
                 for k, f in enumerate(folds):
                     kw = {"epochs": epochs} if name in NEURAL else {}
                     kw.update(params_by_sat.get(str(sat), {}).get(name, params.get(name, {})))
@@ -157,9 +163,11 @@ def run_benchmark(
                         w.X[f.train], w.y[f.train], w.X[f.val], w.y[f.val])
                     p = m.predict(w.X[f.test])
                     fold_preds.append(p)
+                    fold_val.append(m.predict(w.X[f.val]))
                     rows += _error_rows(sat, k, name, seed, w.y[f.test] - p)
                 per_seed.append(np.concatenate(fold_preds))
-            preds[name] = per_seed
+                per_seed_val.append(np.concatenate(fold_val))
+            preds[name], val_preds[name] = per_seed, per_seed_val
             if verbose:
                 mae1 = np.mean([np.abs(y_test[:, 0] - p[:, 0]).mean() for p in per_seed])
                 print(f"[bench]   {name:<16} step-1 MAE {mae1:8.2f} ns   ({time.time() - t_start:.0f}s elapsed)")
@@ -173,8 +181,12 @@ def run_benchmark(
 
         # Per-window test predictions (seed-ensemble mean) + bootstrap confidence intervals.
         ens = {name: np.mean(ps, axis=0) for name, ps in preds.items()}
+        val_idx = np.concatenate([f.val for f in folds])
         np.savez_compressed(os.path.join(out_dir, f"predictions_I{sat:02d}.npz"), y=y_test.astype(np.float32),
-                            **{name: p.astype(np.float32) for name, p in ens.items()})
+                            fold=_fold_ids(folds, "test"), val_y=w.y[val_idx].astype(np.float32),
+                            val_fold=_fold_ids(folds, "val"),
+                            **{name: p.astype(np.float32) for name, p in ens.items()},
+                            **{f"val_{name}": np.mean(ps, axis=0).astype(np.float32) for name, ps in val_preds.items()})
         ci_rows += bootstrap_ci_rows(sat, y_test, ens, horizon)
 
         # Save after every satellite so an interrupted run keeps what it finished.
@@ -235,13 +247,16 @@ def extend_benchmark(
             raise ValueError(f"I{sat:02d}: rebuilt windows do not match {npz_path}; use the original data and "
                              "--seq-len/--horizon/--folds")
         for name in models:
-            fold_preds = []
+            fold_preds, fold_val = [], []
             for k, f in enumerate(folds):
-                p = make_model(name, horizon).fit(w.X[f.train], w.y[f.train], w.X[f.val], w.y[f.val]).predict(
-                    w.X[f.test])
+                m = make_model(name, horizon).fit(w.X[f.train], w.y[f.train], w.X[f.val], w.y[f.val])
+                p = m.predict(w.X[f.test])
                 fold_preds.append(p)
+                fold_val.append(m.predict(w.X[f.val]))
                 rows += _error_rows(sat, k, name, 0, w.y[f.test] - p)
             saved[name] = np.concatenate(fold_preds).astype(np.float32)
+            if "val_y" in saved:                     # runs that predate saved validation predictions skip this
+                saved[f"val_{name}"] = np.concatenate(fold_val).astype(np.float32)
             if "attn_lstm" in saved:
                 dm_rows += _dm_rows(sat, y_test, saved["attn_lstm"], name, saved[name], horizon)
             if verbose:
