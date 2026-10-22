@@ -106,3 +106,11 @@ def test_allan_cli_writes_reports_for_requested_satellites(tmp_path):
         assert result["tau_s"].iloc[0] == 912
         assert result["tau_s"].max() >= 86_400
         assert plot_path.stat().st_size > 0
+
+
+def test_allan_deviation_is_zero_for_a_perfect_clock_with_uneven_spacing():
+    from naviguard.benchmark.allan import overlapping_allan_deviation
+
+    t = np.cumsum(np.r_[0, np.tile([912, 912, 912, 864], 50)]).astype(float)
+    result = overlapping_allan_deviation(t, 4e-11 * t, max_tau_s=4 * 912)
+    np.testing.assert_allclose(result["allan_deviation"], 0, atol=1e-15)
