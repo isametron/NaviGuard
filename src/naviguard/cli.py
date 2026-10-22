@@ -114,6 +114,16 @@ def _cmd_coverage(args):
     print("[coverage] ✓ Complete")
 
 
+def _cmd_allan(args):
+    from naviguard.benchmark.allan import build_allan_deviation_reports
+
+    outputs = build_allan_deviation_reports(args.csv, args.out_dir)
+    for csv_path, plot_path in outputs:
+        print(f"[allan] CSV report: {csv_path}")
+        print(f"[allan] Plot       : {plot_path}")
+    print("[allan] ✓ Complete")
+
+
 def _cmd_benchmark(args):
     from naviguard.benchmark.models import ALL_MODELS
     from naviguard.benchmark.run import extend_benchmark, run_benchmark, run_pooled_benchmark
@@ -295,6 +305,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_cov.add_argument("--min-windows", type=int, default=200, dest="min_windows",
                        help="minimum gap-free windows required for a satellite to qualify")
     p_cov.set_defaults(func=_cmd_coverage)
+
+    p_allan = sub.add_parser("allan", help="Compute gap-aware overlapping Allan deviation for NavIC clock bias")
+    p_allan.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry_6mo.csv"))
+    p_allan.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "allan"), dest="out_dir")
+    p_allan.set_defaults(func=_cmd_allan)
 
     p_bench = sub.add_parser("benchmark", help="Rolling-origin benchmark of forecasters on real NavIC series")
     p_bench.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
