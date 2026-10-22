@@ -1,0 +1,11 @@
+# Light base theme: the glass look in frontend/style.css is designed for it.
+[theme]
+base = "light"
+primaryColor = "#0F5B5C"
+backgroundColor = "#DCE7E8"
+secondaryBackgroundColor = "#EEF3F3"
+textColor = "#0E1B2A"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

@@ -1,275 +1,43 @@
-"""
-dashboard.py  ·  NaviGuard — Pudding-inspired presentation layer
-──────────────────────────────────────────────────────────────────
-Charcoal grid · colorful cards · bold lowercase serif · lightweight UI
-Visual design by Pratyush Narain. Talks to the live naviguard FastAPI
-service (forecasts, baseline comparison, residual anomaly detection and
-local-LLM anomaly reports) instead of reading pre-generated files off disk.
-Adapts to the API's data profile: synthetic telemetry (default) or real
-NavIC broadcast clocks (NAVIGUARD_PROFILE=navic on the API).
+"""NaviGuard dashboard (Streamlit).
 
-Run:
-    uvicorn naviguard.api.main:app          # in one terminal
-    streamlit run frontend/dashboard.py     # in another
-    # real NavIC data:  NAVIGUARD_PROFILE=navic uvicorn naviguard.api.main:app
-"""
+Reads everything from the FastAPI service over HTTP. Four views: Overview, Forecast, Anomalies and (navic
+profile) Satellites. HTML/SVG pieces come from components.py; the look is in style.css.
 
-import html
+Run the API first (`naviguard serve`, or `docker compose up`), then:  streamlit run frontend/dashboard.py
+"""
+import json
 import os
+from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
-# ── API config ───────────────────────────────────────────────────────────────
+import components as ui
+
+# ── API config ────────────────────────────────────────────────────────────────
 API_BASE_URL = os.environ.get("NAVIGUARD_API_URL", "http://127.0.0.1:8000")
 REQUEST_TIMEOUT_S = 10
-# Sent as X-API-Key when the API is started with NAVIGUARD_API_KEY set.
+# Optional shared secret; sent as X-API-Key when the API runs with NAVIGUARD_API_KEY set.
 API_KEY = os.environ.get("NAVIGUARD_API_KEY")
 API_HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
+# /anomaly-report can chain two local-LLM generations (report + severity) of ~60 s each, so give the
+# HTTP client enough headroom rather than misreporting a slow answer as "unreachable".
+ANOMALY_REPORT_TIMEOUT_S = 150
+MAE_TARGET_NS = 50.0
 
-# ── Page config ───────────────────────────────────────────────────────────────
+# ── Page config + theme ───────────────────────────────────────────────────────
 st.set_page_config(
     page_title="naviguard · navic clock intelligence",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# ── Pudding palette ───────────────────────────────────────────────────────────
-BG_CHARCOAL = "#282828"
-CARD_YELLOW = "#f9e87a"
-CARD_LAVENDER = "#e4dff5"
-CARD_SKY = "#9dd4f0"
-CARD_PINK = "#ff8fab"
-CARD_CREAM = "#f5f0e1"
-CARD_MINT = "#b8e8c8"
-INK = "#282828"
-
-# ── Global CSS ─────────────────────────────────────────────────────────────────
-st.markdown(
-    f"""
-<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Libre+Baskerville:ital,wght@0,700;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-    .stApp {{
-        background-color: {BG_CHARCOAL};
-        color: #ffffff;
-        font-family: 'Inter', sans-serif;
-    }}
-    .block-container {{
-        padding-top: 1.5rem;
-        max-width: 1080px;
-    }}
-    header[data-testid="stHeader"] {{ background: transparent; }}
-    hr {{ border: none; margin: 0; visibility: hidden; }}
-
-    [data-testid="stSidebar"] {{
-        background-color: #1e1e1e;
-        border-right: none;
-    }}
-    [data-testid="stSidebar"] h3 {{
-        font-family: 'Libre Baskerville', serif !important;
-        font-weight: 700 !important;
-        color: #fff !important;
-        text-transform: lowercase;
-    }}
-    [data-testid="stSidebar"] p,
-    [data-testid="stSidebar"] label,
-    [data-testid="stSidebar"] span:not([data-testid="stIconMaterial"]),
-    [data-testid="stSidebar"] .stCaption {{
-        color: #a8a8a8 !important;
-        font-family: 'Inter', sans-serif !important;
-    }}
-    [data-testid="stSidebar"] code {{
-        background: #333 !important;
-        color: #f9e87a !important;
-        border-radius: 6px;
-    }}
-
-    h1, h2, h3 {{
-        font-family: 'Libre Baskerville', serif !important;
-        font-weight: 700 !important;
-        color: #ffffff !important;
-        text-transform: lowercase;
-    }}
-
-    .pudding-logo {{
-        font-family: 'Fredoka', sans-serif;
-        font-size: 3.4rem;
-        font-weight: 700;
-        color: #ffffff;
-        text-align: center;
-        margin: 0;
-        letter-spacing: -0.5px;
-        line-height: 1.1;
-    }}
-    .pudding-sub {{
-        text-align: center;
-        font-family: 'Inter', sans-serif;
-        font-size: 0.86rem;
-        color: #888;
-        margin: 8px 0 32px 0;
-        line-height: 1.55;
-    }}
-    .section-label {{
-        font-family: 'Libre Baskerville', serif;
-        font-size: 1.4rem;
-        font-weight: 700;
-        color: #fff;
-        margin: 32px 0 14px 0;
-        text-transform: lowercase;
-    }}
-    .pudding-card {{
-        border-radius: 16px;
-        padding: 18px 20px 16px;
-        margin-bottom: 4px;
-        min-height: 130px;
-    }}
-    .card-meta {{
-        display: flex;
-        justify-content: space-between;
-        font-size: 0.7rem;
-        font-weight: 600;
-        letter-spacing: 0.05em;
-        opacity: 0.5;
-        margin-bottom: 10px;
-        font-family: 'Inter', sans-serif;
-    }}
-    .card-title {{
-        font-family: 'Libre Baskerville', serif;
-        font-weight: 700;
-        font-size: 1.12rem;
-        line-height: 1.25;
-        margin-top: 12px;
-    }}
-    .card-sub {{
-        font-size: 0.8rem;
-        opacity: 0.65;
-        margin-top: 4px;
-        font-family: 'Inter', sans-serif;
-    }}
-    .card-value {{
-        font-family: 'Fredoka', sans-serif;
-        font-size: 2.5rem;
-        font-weight: 700;
-        line-height: 1;
-    }}
-    .chart-wrap {{
-        border-radius: 16px;
-        padding: 14px 16px 12px;
-        margin-bottom: 4px;
-    }}
-    .chart-footer {{
-        padding: 0 4px 4px;
-    }}
-    .status-pill {{
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 999px;
-        font-size: 0.78rem;
-        font-weight: 600;
-        font-family: 'Inter', sans-serif;
-        text-transform: lowercase;
-    }}
-
-    [data-testid="stDataFrame"] {{
-        border: none !important;
-        border-radius: 12px;
-        overflow: hidden;
-    }}
-    [data-testid="stPyplot"] {{
-        background: transparent !important;
-    }}
-    [data-testid="stImage"] {{
-        background: transparent !important;
-    }}
-    .stSlider label, .stToggle label {{
-        font-family: 'Inter', sans-serif !important;
-        text-transform: lowercase;
-    }}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+st.markdown(f"<style>{(Path(__file__).parent / 'style.css').read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 
-def metric_card(meta_l: str, meta_r: str, bg: str, value: str, title: str, subtitle: str) -> str:
-    return f"""
-    <div class="pudding-card" style="background:{bg}; color:{INK};">
-        <div class="card-meta"><span>{meta_l}</span><span>{meta_r}</span></div>
-        <div class="card-value">{value}</div>
-        <div class="card-title">{title}</div>
-        <div class="card-sub">{subtitle}</div>
-    </div>
-    """
-
-
-def broadcast_deviation_ns(df: pd.DataFrame) -> tuple[pd.Series, list[int]]:
-    """Real clock bias minus the line its own broadcast drift (af1) predicts, in ns from the first row.
-
-    It would stay at 0 if af1 explained every step; routine ground-segment refits show up as steps.
-    Also returns the rows whose single-step miss exceeds 4 robust sigmas (a local display rule; the
-    anomaly report below does the actual refit/fault classification).
-    """
-    bias_ns = df["clock_bias_s"].to_numpy(dtype=float) * 1e9
-    predicted = df["clock_drift_s_per_s"].to_numpy(dtype=float)[:-1] * np.diff(df["timestamp_s"].to_numpy(dtype=float))
-    miss = np.diff(bias_ns) - predicted * 1e9
-    deviation = pd.Series(np.r_[0.0, np.cumsum(miss)])
-    if len(miss) < 3:
-        return deviation, []
-    center = np.median(miss)
-    sigma = 1.4826 * np.median(np.abs(miss - center))
-    jumps = (np.flatnonzero(np.abs(miss - center) > 4 * sigma) + 1).tolist() if sigma > 0 else []
-    return deviation, jumps
-
-
-def pudding_plot(series, ylabel: str, bg: str, line_color: str = INK, marks=None, marks_label: str = ""):
-    fig, ax = plt.subplots(figsize=(5.4, 2.7), facecolor=bg)
-    ax.set_facecolor(bg)
-    ax.plot(series.values, color=line_color, lw=2.2, solid_capstyle="round")
-    ax.fill_between(range(len(series)), series.values, alpha=0.14, color=line_color)
-    if marks:
-        ax.scatter(marks, series.values[marks], color="#6f6f6f", s=26, zorder=3, label=marks_label)
-        ax.legend(fontsize=7, frameon=False, labelcolor=INK, loc="best")
-    ax.set_xlabel("sample", fontsize=8, color=INK, alpha=0.45)
-    ax.set_ylabel(ylabel, fontsize=8, color=INK, alpha=0.45)
-    ax.tick_params(colors=INK, labelsize=7, length=0)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    ax.grid(alpha=0.12, linestyle="-", color=INK)
-    fig.tight_layout(pad=0.8)
-    return fig
-
-
-def pudding_compare_plot(actual, predicted, ylabel: str, bg: str):
-    fig, ax = plt.subplots(figsize=(11, 3.2), facecolor=bg)
-    ax.set_facecolor(bg)
-    ax.plot(actual, color=INK, lw=2.0, label="actual", solid_capstyle="round")
-    ax.plot(predicted, color="#c0392b", lw=2.0, ls="--", label="predicted", solid_capstyle="round")
-    ax.fill_between(range(len(actual)), actual, predicted, alpha=0.12, color=INK)
-    ax.set_xlabel("test time step", fontsize=8, color=INK, alpha=0.45)
-    ax.set_ylabel(ylabel, fontsize=8, color=INK, alpha=0.45)
-    ax.tick_params(colors=INK, labelsize=7, length=0)
-    ax.legend(fontsize=8, frameon=False, labelcolor=INK)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    ax.grid(alpha=0.12, linestyle="-", color=INK)
-    fig.tight_layout(pad=0.8)
-    return fig
-
-
-# ── API helpers ────────────────────────────────────────────────────────────────
-# Anomaly-report calls up to two sequential local-LLM generations on the
-# backend (report + severity), each with its own ~60s budget — give the
-# HTTP client enough headroom to see that through rather than giving up
-# early and misreporting a slow response as "unreachable".
-ANOMALY_REPORT_TIMEOUT_S = 150
-
-
+# ── API helpers ───────────────────────────────────────────────────────────────
 def api_get(path: str, **params):
     try:
         resp = requests.get(f"{API_BASE_URL}{path}", params=params, headers=API_HEADERS, timeout=REQUEST_TIMEOUT_S)
@@ -290,67 +58,60 @@ def api_post(path: str, json_body: dict, timeout: float = REQUEST_TIMEOUT_S):
         return None, {"error": "unreachable", "message": str(e)}
 
 
-def api_unreachable_banner(body: dict | None = None):
+# Short-lived cache so switching views doesn't repeat slow calls (the LLM report especially).
+# The "Refresh data" button in the sidebar clears it.
+@st.cache_data(ttl=45, show_spinner=False)
+def cached_get(path: str, params: tuple = ()):
+    return api_get(path, **dict(params))
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def cached_post(path: str, body_json: str, timeout: float = REQUEST_TIMEOUT_S):
+    return api_post(path, json.loads(body_json), timeout)
+
+
+def show(html: str):
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ── Notices (API problems and empty states) ───────────────────────────────────
+def api_unreachable_notice(body: dict | None = None):
+    url = f"<code>{ui.esc(API_BASE_URL)}</code>"
     if body and body.get("error") == "timeout":
-        st.markdown(
-            f"""
-            <div style="background:{CARD_YELLOW};border-radius:14px;padding:18px 22px;color:{INK};
-                        font-family:Inter,sans-serif;font-size:0.92rem;line-height:1.6;">
-                <b>request timed out</b> waiting on <code style="background:rgba(0,0,0,0.08);
-                padding:2px 8px;border-radius:6px;">{API_BASE_URL}</code>.<br/>
-                the local llm can be slow on first generation — try again in a moment.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        show(ui.notice("warn", "The request timed out",
+                       f"Waiting on {url}. The local LLM can be slow on its first generation. Try again in a moment."))
         return
-    st.markdown(
-        f"""
-        <div style="background:{CARD_PINK};border-radius:14px;padding:18px 22px;color:{INK};
-                    font-family:Inter,sans-serif;font-size:0.92rem;line-height:1.6;">
-            <b>can't reach the naviguard api</b> at <code style="background:rgba(0,0,0,0.08);
-            padding:2px 8px;border-radius:6px;">{API_BASE_URL}</code>.<br/>
-            start it with <code style="background:rgba(0,0,0,0.08);padding:2px 8px;
-            border-radius:6px;">uvicorn naviguard.api.main:app</code> and refresh.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    show(ui.notice("error", "Can't reach the NaviGuard API",
+                   f"Nothing answered at {url}. Start it with <code>uvicorn naviguard.api.main:app</code> "
+                   f"(or <code>docker compose up</code>) and refresh."))
 
 
-def model_not_trained_banner(message: str, navic: bool = False):
+def model_not_trained_notice(message: str, navic: bool = False):
     cmds = ("naviguard fetch", "naviguard train-navic") if navic else ("naviguard preprocess", "naviguard train")
-    code = "background:rgba(0,0,0,0.08);padding:3px 8px;border-radius:6px;font-size:0.85rem;"
-    st.markdown(
-        f"""
-        <div style="background:{CARD_YELLOW};border-radius:14px;padding:18px 22px;color:{INK};
-                    font-family:Inter,sans-serif;font-size:0.92rem;line-height:1.5;">
-            model isn't trained yet.<br/>
-            run <code style="{code}">{cmds[0]}</code> then <code style="{code}">{cmds[1]}</code>.
-            <div style="opacity:0.6;font-size:0.78rem;margin-top:8px;">{message}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    show(ui.notice("warn", "The model isn't trained yet",
+                   f"Run <code>{cmds[0]}</code>, then <code>{cmds[1]}</code>, and refresh. {ui.esc(message)}"))
 
 
-def unauthorized_banner():
-    st.markdown(
-        f"""
-        <div style="background:{CARD_PINK};border-radius:14px;padding:18px 22px;color:{INK};
-                    font-family:Inter,sans-serif;font-size:0.92rem;line-height:1.5;">
-            the api rejected the request (401) — it requires an api key.<br/>
-            set <code style="background:rgba(0,0,0,0.08);padding:3px 8px;border-radius:6px;">NAVIGUARD_API_KEY</code>
-            in the environment running this dashboard, then refresh.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def unauthorized_notice():
+    show(ui.notice("error", "The API rejected the request (401)",
+                   "It requires an API key. Set <code>NAVIGUARD_API_KEY</code> in the environment running this "
+                   "dashboard, then refresh."))
 
 
-# ── Profile + model info (drive header, sidebar and chart labels) ─────────────────
+def eval_error_notice(status, body):
+    if status == 401:
+        unauthorized_notice()
+    elif status == 503:
+        model_not_trained_notice(body.get("message", ""), navic=is_navic)
+    elif status is None:
+        api_unreachable_notice(body)
+    else:
+        show(ui.notice("error", "Evaluation failed", ui.esc(str(body))))
+
+
+# ── Profile, model info, satellites ───────────────────────────────────────────
 health_status, health_body = api_get("/health")
-profile = health_body.get("profile") or "synthetic" if health_status == 200 else "synthetic"
+profile = (health_body.get("profile") or "synthetic") if health_status == 200 else "synthetic"
 is_navic = profile == "navic"
 
 info_status, info_body = api_get("/model/info")
@@ -358,625 +119,485 @@ model_info = info_body if info_status == 200 else None
 served_kind = ((model_info or {}).get("hparams") or {}).get("kind") if is_navic else "attention-lstm"
 served_kind = (served_kind or "model").replace("_", "-")
 
-# ── Header ─────────────────────────────────────────────────────────────────────
-_subtitle = (
-    "navic broadcast-clock forecasting &amp; anomaly monitoring · real data · isro · bmsce 2025–26"
-    if is_navic else
-    "navic clock bias forecasting &amp; anomaly monitoring · synthetic telemetry · isro · bmsce 2025–26"
-)
-st.markdown(
-    f"""
-<div class="pudding-logo">naviguard</div>
-<div class="pudding-sub">
-    {_subtitle}
-</div>
-""",
-    unsafe_allow_html=True,
+_sat_status, _sat_body = api_get("/telemetry", limit=1)
+satellites = (_sat_body.get("satellites") or []) if _sat_status == 200 else []
+
+# Input features come from the model, falling back to the profile's defaults when it isn't trained.
+_feature_list = (model_info or {}).get("features") or (["clock_bias_s", "clock_drift_s_per_s"] if is_navic
+                                                         else ["bias", "drift", "ephemeris"])
+n_features = len(_feature_list)
+feature_names = " \u00b7 ".join(
+    f.replace("clock_", "").replace("_s_per_s", "").replace("_s", "").replace("_m", "") for f in _feature_list
 )
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+VIEWS = ["Overview", "Forecast", "Anomalies"] + (["Satellites"] if is_navic and len(satellites) > 1 else [])
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### controls")
-    st.caption(API_BASE_URL)
-    # Satellite selector: only for multi-satellite data (the api lists the ids it has).
-    _sat_status, _sat_body = api_get("/telemetry", limit=1)
-    satellites = (_sat_body.get("satellites") or []) if _sat_status == 200 else []
+    show(ui.brand())
     satellite_id = None
+    sat_note_slot = st.empty()
     if satellites:
-        satellite_id = st.selectbox("satellite", satellites, format_func=lambda s: f"I{int(s):02d}" if is_navic else f"sat {s}")
-    telemetry_limit = st.slider("telemetry rows", 10, 200, 60)
-    show_drift = st.toggle("clock drift panel", value=False)
-    show_raw = st.toggle("raw data table", value=True)
-    include_llm = st.toggle("local llm anomaly report", value=True)
-    st.markdown("---")
-    st.markdown("**model**")
-    if is_navic and model_info:
-        st.code(
-            f"served: {served_kind}\nselected on validation MAE\nwindows: level-free (relative to last bias)",
-            language="text",
+        satellite_id = st.selectbox(
+            "Satellite", satellites, label_visibility="collapsed",
+            format_func=lambda s: f"I{int(s):02d}" if is_navic else f"sat {s}",
         )
-        cands = model_info.get("candidates") or {}
-        for name, c in cands.items():
-            st.caption(f"{name.replace('_', '-')}: val MAE {c['val_mae_ns']:.2f} ns")
-        st.caption(f"seq_len={model_info['seq_len']}  ·  horizon={model_info['horizon']} steps")
-    elif model_info:
-        st.code(
-            f"LSTM(64) -> Drop(0.2)\nLSTM(32) -> Attention(32)\nDense(16) -> Dense({model_info['horizon']})",
-            language="text",
-        )
-        st.caption(f"seq_len={model_info['seq_len']}  ·  horizon={model_info['horizon']} steps")
+    show(ui.side_label("Controls"))
+    telemetry_limit = st.slider("Telemetry rows", 10, 200, 60)
+    show_drift = st.toggle("Clock drift panel", value=False)
+    show_raw = st.toggle("Raw data table", value=True)
+    include_llm = st.toggle("Local LLM operator brief", value=True)
+    if st.button("Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
+    show(ui.side_label("Model"))
+    if model_info:
+        rows = [("served", served_kind)]
+        notes = []
+        if is_navic:
+            rows += [(n.replace("_", "-"), f"{c['val_mae_ns']:.2f} ns")
+                     for n, c in (model_info.get("candidates") or {}).items()]
+            notes.append("Validation MAE per candidate. The served model was selected on validation only.")
+            notes.append("Real broadcast clocks (DLR BRDM via BKG): what the satellite broadcasts, not a precise clock product.")
+        else:
+            notes.append("LSTM(64) \u2192 Dropout(0.2) \u2192 LSTM(32) \u2192 Attention(32) \u2192 Dense(16) \u2192 Dense(horizon)")
+        rows += [("window", f"{model_info['seq_len']} samples"), ("horizon", f"{model_info['horizon']} steps")]
+        rows.append(("features", str(n_features)))
+        notes.append(f"Input features: {feature_names}.")
+        show(ui.model_block(rows, notes, MAE_TARGET_NS))
     else:
-        st.code(
-            "LSTM(64) -> Drop(0.2)\nLSTM(32) -> Attention(32)\nDense(16) -> Dense(horizon)",
-            language="text",
-        )
-        st.caption("model not trained yet")
-    if is_navic:
-        st.caption("real broadcast clocks (DLR BRDM via BKG) — what the satellite broadcasts, not a precise clock product")
-    st.markdown(
-        f"""
-        <div style="background:{CARD_YELLOW};color:{INK};padding:10px 14px;
-                    border-radius:10px;font-size:0.84rem;font-weight:600;
-                    font-family:Inter,sans-serif;">
-            mae target ≤ 50 ns (step 1)
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.caption(f"{API_BASE_URL} · live")
+        show(ui.model_block([("served", "not trained")], ["Run the training command, then refresh."], MAE_TARGET_NS))
+    show(ui.side_label("API"))
+    show(ui.sat_note(f"{API_BASE_URL} \u00b7 live"))
 
-# ── Telemetry ────────────────────────────────────────────────────────────────
+# ── View switcher (main page, above everything else) ──────────────────────────
+show(ui.nav_header("View"))
+view = st.radio("View", VIEWS, horizontal=True, label_visibility="collapsed", key="view")
+
+# ── Telemetry (every view needs it) ───────────────────────────────────────────
 tele_params = {"limit": telemetry_limit}
 if satellite_id is not None:
-    tele_params["satellite_id"] = satellite_id
+    tele_params["satellite_id"] = int(satellite_id)
 tele_status, tele_body = api_get("/telemetry", **tele_params)
 
 if tele_status is None:
-    api_unreachable_banner(tele_body)
+    api_unreachable_notice(tele_body)
     st.stop()
 elif tele_status == 401:
-    unauthorized_banner()
+    unauthorized_notice()
     st.stop()
 elif tele_status == 503:
-    st.markdown(
-        f'<div style="background:{CARD_YELLOW};border-radius:14px;padding:18px 22px;color:{INK};">'
-        f'no telemetry yet — {tele_body.get("message", "")}<br/>'
-        f'run <code>{"naviguard fetch" if is_navic else "naviguard generate"}</code> first.</div>',
-        unsafe_allow_html=True,
-    )
+    show(ui.notice("warn", "No telemetry yet", f"{ui.esc(tele_body.get('message', ''))} Run "
+                   f"<code>{'naviguard fetch' if is_navic else 'naviguard generate'}</code> first."))
     st.stop()
 elif tele_status != 200:
-    st.error(f"telemetry fetch failed: {tele_body}")
+    show(ui.notice("error", "Telemetry fetch failed", ui.esc(str(tele_body))))
     st.stop()
 
 df = pd.DataFrame(tele_body["rows"])
 n_total = tele_body["n_rows"]
-
-if "timestamp_s" in df.columns:
-    elapsed_h = df["timestamp_s"].iloc[-1] / 3600
-    month_label = f"{elapsed_h:.0f}h track"
-else:
-    month_label = "navic"
 sat_label = f"I{int(satellite_id):02d}" if (is_navic and satellite_id is not None) else "navic"
+sat_scope = {"satellite_id": int(satellite_id)} if (is_navic and satellite_id is not None) else {}
 
-# Cadence and feature count come from the data/model, not constants (real NavIC records arrive every ~912 s).
+# Cadence comes from the model or the data, not a constant (real NavIC records arrive every ~912 s).
 step_s = (model_info or {}).get("step_s")
 if step_s is None and "timestamp_s" in df.columns and len(df) > 1:
     step_s = float(df["timestamp_s"].diff().median())
 step_s = step_s or 900
-n_features = len((model_info or {}).get("features") or []) or (2 if is_navic else 3)
-feature_names = " · ".join(
-    n.replace("clock_", "").replace("_s_per_s", "").replace("_s", "").replace("_m", "")
-    for n in ((model_info or {}).get("features") or (["clock_bias_s", "clock_drift_s_per_s"] if is_navic
-                                                     else ["bias", "drift", "ephemeris"]))
-)
 
-# ── Metric cards ───────────────────────────────────────────────────────────────
-m1, m2, m3, m4 = st.columns(4)
-with m1:
-    st.markdown(
-        metric_card(f"#{n_total}", month_label, CARD_YELLOW, str(n_total),
-                    "telemetry samples", "live from naviguard api"),
-        unsafe_allow_html=True,
-    )
-with m2:
-    st.markdown(
-        metric_card(f"{step_s / 60:.0f}m", "interval", CARD_SKY,
-                    f"{step_s / 60:.1f}<span style='font-size:1rem;opacity:0.5'> min</span>",
-                    "sampling rate", f"{step_s:.0f} second steps"),
-        unsafe_allow_html=True,
-    )
-with m3:
-    st.markdown(
-        metric_card(f"{n_features}×", "features", CARD_PINK, str(n_features),
-                    "input features", feature_names),
-        unsafe_allow_html=True,
-    )
-with m4:
-    horizon_val = model_info["horizon"] if model_info else "—"
-    st.markdown(
-        metric_card(str(horizon_val), "steps", CARD_LAVENDER, str(horizon_val),
-                    "forecast horizon", f"{served_kind} output"),
-        unsafe_allow_html=True,
-    )
+sat_note_slot.markdown(ui.sat_note(f"{n_total:,} samples \u00b7 one every {step_s / 60:.0f} min"), unsafe_allow_html=True)
 
-# ── Raw table ─────────────────────────────────────────────────────────────────
-if show_raw:
-    st.markdown('<div class="section-label">latest telemetry</div>', unsafe_allow_html=True)
-    st.markdown(
-        f"""
-        <div style="background:{CARD_CREAM};border-radius:16px 16px 0 0;padding:14px 18px 0;">
-            <div class="card-meta" style="color:{INK};">
-                <span>#samples</span><span>{month_label}</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    fmt = {}
-    if "clock_bias_s" in df.columns:
-        fmt["clock_bias_s"] = "{:.4e}"
-    if "clock_drift_s_per_s" in df.columns:
-        fmt["clock_drift_s_per_s"] = "{:.4e}"
+
+def load_eval():
+    return cached_get("/predict/evaluate", tuple(sat_scope.items()))
+
+
+def load_forecast():
+    body = {"satellite_id": int(satellite_id)} if satellite_id is not None else {}
+    return cached_post("/predict", json.dumps(body, sort_keys=True), REQUEST_TIMEOUT_S)
+
+
+def load_report(with_llm: bool):
+    body = {"include_llm": with_llm, **sat_scope}
+    return cached_post("/anomaly-report", json.dumps(body, sort_keys=True), ANOMALY_REPORT_TIMEOUT_S)
+
+
+def summarize_detection(det: dict | None):
+    """One shape for both detectors: the refit-aware verdict when the API has it, otherwise the raw one."""
+    if not det:
+        return None
+    ra = det.get("refit_aware")
+    base = dict(n_scored=det["n_scored"], raw_flagged=det["n_flagged"], raw_severity=det["severity"],
+                raw_thr=det["z_threshold"], raw_max=det["max_abs_z"])
+    if ra:
+        sc = ra["shape_counts"]
+        return dict(base, kind="refit", severity=ra["severity"], alarms=ra["n_alarms"], jumps=ra["n_jumps"],
+                    refits=sc.get("refit", 0), spikes=sc.get("spike", 0), sustained=sc.get("sustained", 0),
+                    edge=sc.get("edge", 0), z=ra.get("z_scores") or [], thr=ra["z_threshold"],
+                    alarm_idx=ra["alarm_indices"], events=ra["events"])
+    return dict(base, kind="raw", severity=det["severity"], alarms=det["n_flagged"], jumps=det["n_flagged"],
+                refits=0, spikes=0, sustained=0, edge=0, z=det.get("z_scores") or [], thr=det["z_threshold"],
+                alarm_idx=det.get("flagged_indices") or [], events=[])
+
+
+SEV_TONE = {"nominal": "ok", "watch": "warn", "anomalous": "bad"}
+SEV_COLOR = {"nominal": ui.TEAL, "watch": ui.PEACH, "anomalous": ui.ALARM}
+
+
+def mins(k: float) -> str:
+    """Minutes for k forecast steps, rounded to the nearest 5 (real NavIC steps are 15.2 min)."""
+    return f"{round(k * step_s / 60 / 5) * 5:.0f}"
+
+
+def page_header(name: str):
+    live = f"Live \u00b7 {profile} profile \u00b7 {served_kind}" if model_info else f"Live \u00b7 {profile} profile \u00b7 model not trained"
+    # The Satellites view compares all satellites, so the selected one doesn't belong in its breadcrumb.
+    crumbs = ["NaviGuard", name] if name == "Satellites" else ["NaviGuard", sat_label, name]
+    show(ui.topbar(crumbs, live))
+
+
+def clock_panels():
+    """(title, subtitle, values, unit) for the secondary clock charts."""
+    out = []
     if "ephemeris_error_m" in df.columns:
-        fmt["ephemeris_error_m"] = "{:.4f}"
-    if "tgd_s" in df.columns:
-        fmt["tgd_s"] = "{:.3e}"
-    st.dataframe(df.tail(12).style.format(fmt), width="stretch", height=260)
+        out.append(("Ephemeris error", "Orbital position drift in metres.", df["ephemeris_error_m"].tolist(), "m"))
+        if show_drift:
+            out.append(("Clock drift", "Rate of change in clock bias.", (df["clock_drift_s_per_s"] * 1e10).tolist(), "\u00d710\u207b\u00b9\u2070 s/s"))
+    elif "clock_drift_s_per_s" in df.columns:
+        out.append(("Broadcast drift (af1)", "Rate of change in clock bias, as broadcast.", (df["clock_drift_s_per_s"] * 1e10).tolist(), "\u00d710\u207b\u00b9\u2070 s/s"))
+    return out
 
-# ── Time-series ────────────────────────────────────────────────────────────────
-st.markdown('<div class="section-label">time-series</div>', unsafe_allow_html=True)
 
-col1, col2 = st.columns(2)
+# ── Views ─────────────────────────────────────────────────────────────────────
+def page_overview():
+    page_header("Overview")
+    ev_status, ev = load_eval()
+    fc_status, fc = load_forecast() if ev_status == 200 else (None, {})
+    s = None
+    if ev_status == 200:
+        rep_status, rep = load_report(False)
+        if rep_status == 200:
+            s = summarize_detection(rep.get("detection"))
 
-with col1:
-    st.markdown(
-        f'<div class="chart-wrap" style="background:{CARD_SKY};color:{INK};">'
-        f'<div class="card-meta"><span>live</span><span>{sat_label}</span></div>',
-        unsafe_allow_html=True,
-    )
-    if is_navic:
-        # The raw bias (~580 µs) climbs only a few µs per window and plots as a flat line. Show what the
-        # broadcast drift next to it does not explain instead: the clock minus its own af1 line.
-        deviation, jumps = broadcast_deviation_ns(df)
-        st.pyplot(pudding_plot(deviation, "ns", CARD_SKY, marks=jumps, marks_label=f"jumps > 4σ ({len(jumps)})"),
-                  width="stretch")
-        bias_title = "clock vs broadcast drift"
-        bias_sub = "how far the real clock wanders from what its broadcast drift predicts"
+    subject = sat_label if (is_navic and satellite_id is not None) else "The forecaster"
+    eyebrow = f"{sat_label} \u00b7 {profile} profile \u00b7 {served_kind if model_info else 'no model loaded'}"
+    if ev_status == 200:
+        mae1 = ev["mae_ns"][0]
+        passed = ev["pass_step1"]
+        sub = f"{ui.esc(served_kind)} error is {ui.num(f'{mae1:.1f} ns')} at step 1 against the {MAE_TARGET_NS:.0f} ns target"
+        if s:
+            sub += f", with {ui.num(ui.plural(s['alarms'], 'alarm'))} across {s['n_scored']:,} test windows"
+            if s["kind"] == "refit" and s["refits"]:
+                sub += f" and {ui.plural(s['refits'], 'routine refit')} set aside"
+        show(ui.hero(eyebrow, f"{subject} is {'within' if passed else 'outside'} target.", sub + "."))
     else:
-        st.pyplot(pudding_plot(df["clock_bias_s"] * 1e6, "μs", CARD_SKY), width="stretch")
-        bias_title, bias_sub = "clock bias", "satellite oscillator offset over time"
-    st.markdown(
-        f"""
-        <div class="chart-footer" style="color:{INK};">
-            <div class="card-title">{bias_title}</div>
-            <div class="card-sub">{bias_sub}</div>
-        </div></div>
-        """,
-        unsafe_allow_html=True,
-    )
+        show(ui.hero(eyebrow, f"{sat_label} telemetry is live.",
+                     "The forecast model isn't available yet, so only the raw clock data is shown below."))
 
-has_ephemeris = "ephemeris_error_m" in df.columns
-
-with col2:
-    st.markdown(
-        f'<div class="chart-wrap" style="background:{CARD_YELLOW};color:{INK};">'
-        f'<div class="card-meta"><span>live</span><span>{sat_label}</span></div>',
-        unsafe_allow_html=True,
-    )
-    if has_ephemeris:
-        st.pyplot(pudding_plot(df["ephemeris_error_m"], "m", CARD_YELLOW), width="stretch")
-        panel_title, panel_sub = "ephemeris error", "orbital position drift in meters"
+    if ev_status == 200:
+        horizon = ev["horizon"]
+        mae = ev["mae_ns"]
+        skill = ev.get("skill_vs_persistence")
+        pers = ((ev.get("baselines") or {}).get("persistence") or {}).get("mae_ns")
+        resid = [abs(a[0] - p[0]) for a, p in zip(ev["actual_ns"], ev["predicted_ns"])]
+        deviation = ui.broadcast_deviation_ns(df)[0] if (is_navic and len(df) >= 4) else df["clock_bias_s"] * 1e6
+        cells = [
+            dict(label="Telemetry samples", value=f"{n_total:,}", spark=deviation.tolist(), color=ui.TEAL,
+                 foot=f"{sat_label} \u00b7 clock vs broadcast drift, last {len(df)}"),
+            dict(label="Forecast error \u00b7 step 1", value=f"{mae[0]:.1f}", unit="ns", color=ui.GREY, spark=mae,
+                 status="within target" if ev["pass_step1"] else "above target", tone="ok" if ev["pass_step1"] else "bad",
+                 foot=f"step {horizon}: {mae[-1]:.1f} ns \u00b7 target \u2264 {MAE_TARGET_NS:.0f} ns"),
+            dict(label="Skill vs persistence", value="\u2014" if skill is None else f"{skill:+.0%}", color=ui.TEAL, spark=resid,
+                 status=None if skill is None else ("better than persistence" if skill > 0 else "worse than persistence"),
+                 tone="ok" if (skill or 0) > 0 else "bad",
+                 foot=(f"persistence: {pers[0]:.1f} ns at step 1" if pers else "step-1 residual over the test split")),
+        ]
+        if s:
+            cells.append(dict(label="Alarms" if s["kind"] == "refit" else "Windows flagged", value=str(s["alarms"]),
+                              color=SEV_COLOR.get(s["severity"], ui.TEAL), spark=[abs(z) for z in s["z"]], how="max",
+                              status=s["severity"], tone=SEV_TONE.get(s["severity"], "ok"),
+                              foot=(f"{ui.plural(s['jumps'], 'jump')} \u00b7 {s['refits']} routine refits" if s["kind"] == "refit"
+                                    else f"|robust z| above {s['thr']:.1f}")))
+        else:
+            cells.append(dict(label="Alarms", value="\u2014", foot="anomaly check unavailable"))
+        show(ui.kpi_strip(cells))
     else:
-        # Real broadcast data has no ephemeris-error column: show the broadcast clock drift (af1) instead.
-        st.pyplot(pudding_plot(df["clock_drift_s_per_s"] * 1e10, "×10⁻¹⁰ s/s", CARD_YELLOW), width="stretch")
-        panel_title, panel_sub = "clock drift (af1)", "rate of change in clock bias, as broadcast"
-    st.markdown(
-        f"""
-        <div class="chart-footer" style="color:{INK};">
-            <div class="card-title">{panel_title}</div>
-            <div class="card-sub">{panel_sub}</div>
-        </div></div>
-        """,
-        unsafe_allow_html=True,
-    )
+        eval_error_notice(ev_status, ev)
 
-if show_drift and has_ephemeris:
-    st.markdown(
-        f'<div class="chart-wrap" style="background:{CARD_MINT};color:{INK};margin-top:8px;">'
-        f'<div class="card-meta"><span>live</span><span>drift</span></div>',
-        unsafe_allow_html=True,
-    )
-    st.pyplot(pudding_plot(df["clock_drift_s_per_s"] * 1e10, "×10⁻¹⁰ s/s", CARD_MINT), width="stretch")
-    st.markdown(
-        f"""
-        <div class="chart-footer" style="color:{INK};">
-            <div class="card-title">clock drift</div>
-            <div class="card-sub">rate of change in clock bias</div>
-        </div></div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# ── Prediction ─────────────────────────────────────────────────────────────────
-st.markdown(f'<div class="section-label">{served_kind} prediction</div>', unsafe_allow_html=True)
-
-# satellite_id scopes evaluation/anomaly scoring to one satellite (navic profile; ignored otherwise).
-sat_scope = {"satellite_id": int(satellite_id)} if (is_navic and satellite_id is not None) else {}
-eval_status, eval_body = api_get("/predict/evaluate", **sat_scope)
-
-if eval_status == 200:
-    step1_actual = [row[0] / 1e3 for row in eval_body["actual_ns"]]      # ns -> us
-    step1_predicted = [row[0] / 1e3 for row in eval_body["predicted_ns"]]
-    mae_ns = eval_body["mae_ns"][0]
-    rmse_ns = eval_body["rmse_ns"][0]
-    passed = eval_body["pass_step1"]
-
-    st.markdown(
-        f"""
-        <div style="background:{CARD_LAVENDER};border-radius:16px;padding:18px 20px 8px;color:{INK};">
-            <div class="card-meta">
-                <span>step 1 / {eval_body['horizon']}</span>
-                <span>{eval_body['n_test_samples']} test samples</span>
-            </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.pyplot(pudding_compare_plot(step1_actual, step1_predicted, "μs", CARD_LAVENDER), width="stretch")
-    pill_bg = CARD_MINT if passed else CARD_PINK
-    st.markdown(
-        f"""
-        <div style="color:{INK};padding:4px 4px 14px;">
-            <div class="card-title">actual vs predicted</div>
-            <div class="card-sub">mae {mae_ns:.2f} ns · rmse {rmse_ns:.2f} ns
-                <span class="status-pill" style="background:{pill_bg};margin-left:8px;">
-                    {'within target' if passed else 'exceeds target'}
-                </span>
-            </div>
-        </div></div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if is_navic:
-        st.caption(
-            f"the clock drifts by tens of µs across the test period while the model's error is only about "
-            f"{mae_ns:.1f} ns, so the two lines overlap — judge the forecaster against the baselines below."
+    # Main chart: how the clock moves
+    ticks, names = ui.time_axis(df)
+    stat_items = [("Current bias", f"{df['clock_bias_s'].iloc[-1] * 1e6:,.2f} \u00b5s", "")]
+    if is_navic and {"clock_drift_s_per_s", "timestamp_s"} <= set(df.columns) and len(df) >= 4:
+        dev, jumps = ui.broadcast_deviation_ns(df)
+        peak = float(np.max(np.abs(dev)))
+        title = f"The clock strays {peak:,.0f} ns from its broadcast drift line."
+        sub = (f"Over the last {len(df)} samples, {ui.plural(len(jumps), 'jump')} exceeded 4\u03c3. "
+               f"Routine ground-segment refits show up as steps.")
+        main_chart = ui.chart(
+            [dict(name="clock minus broadcast drift", values=dev.tolist(), color=ui.TEAL)],
+            height=320, x_ticks=ticks, x_names=names, y_unit="ns",
+            dots=[dict(series=0, idx=jumps, color=ui.GREY, label=f"jumps > 4\u03c3 ({len(jumps)})")] if jumps else [],
+            uid="main", aria="Clock bias minus its broadcast drift line, in nanoseconds",
         )
+        stat_items += [("Peak deviation", f"{peak:,.0f} ns", ""), ("Large jumps", str(len(jumps)), "warn" if jumps else "ok")]
+    else:
+        title, sub = "Clock bias over the window.", "Satellite oscillator offset over time."
+        main_chart = ui.chart([dict(name="clock bias", values=(df["clock_bias_s"] * 1e6).tolist(), color=ui.TEAL)],
+                              height=320, x_ticks=ticks, x_names=names, y_unit="\u00b5s", uid="main",
+                              aria="Clock bias in microseconds")
+    if fc_status == 200 and "clock_bias_s" in df.columns:
+        last_ns = float(df["clock_bias_s"].iloc[-1]) * 1e9
+        d1 = fc["predicted_clock_bias_ns"][0] - last_ns
+        stat_items.append((f"Forecast +{mins(1)} min", f"{d1:+.1f} ns", ""))
+    show(ui.panel(title, sub, ui.stats(stat_items) + main_chart))
 
-    # ── Baseline comparison: does the served model beat naive/classical forecasters? ──
-    baselines = eval_body.get("baselines") or {}
+    # Secondary row: raw rows and the drift / ephemeris charts
+    panels = clock_panels()
+    side_html = [ui.panel(t, sb, ui.chart([dict(values=v, color=ui.TEAL)], height=230, y_unit=u, uid=f"side{i}",
+                                          aria=t, x_ticks=ticks, x_names=names, width=520, font=13))
+                 for i, (t, sb, v, u) in enumerate(panels)]
+    side_html = [h.replace('class="ng-panel"', 'class="ng-panel compact"') for h in side_html]
+    if show_raw:
+        fmt = {"clock_bias_s": "{:.4e}", "clock_drift_s_per_s": "{:.4e}", "ephemeris_error_m": "{:.4f}", "tgd_s": "{:.3e}"}
+        left, right = st.columns([3, 2], gap="large")
+        with left:
+            show(ui.panel("Latest telemetry", f"The {min(8, len(df))} most recent rows from {sat_label}.", ui.data_table(df.tail(8).drop(columns=["satellite_id"], errors="ignore"), fmt)))
+        with right:
+            for h in side_html:
+                show(h)
+    elif side_html:
+        for col, h in zip(st.columns(len(side_html), gap="large"), side_html):
+            with col:
+                show(h)
+
+
+def page_forecast():
+    page_header("Forecast")
+    ev_status, ev = load_eval()
+    if ev_status != 200:
+        eval_error_notice(ev_status, ev)
+        return
+    fc_status, fc = load_forecast()
+    horizon = ev["horizon"]
+    mae = ev["mae_ns"]
+    eyebrow = f"{sat_label} \u00b7 {served_kind} \u00b7 {ev['n_test_samples']:,} test windows"
+
+    deltas = []
+    if fc_status == 200 and "clock_bias_s" in df.columns:
+        last_ns = float(df["clock_bias_s"].iloc[-1]) * 1e9
+        deltas = [v - last_ns for v in fc["predicted_clock_bias_ns"]]
+    if deltas:
+        show(ui.hero(eyebrow, f"The clock is forecast to move {deltas[-1]:+.0f} ns in about {mins(len(deltas))} minutes.",
+                     f"Relative to the last observed bias on {ui.esc(sat_label)}, from the {ui.esc(served_kind)} forecaster. "
+                     f"Typical error at the first step is {ui.num(f'{mae[0]:.1f} ns')}."))
+        show(ui.stats([(f"t+{mins(i + 1)} min", f"{d:+.1f} ns", "") for i, d in enumerate(deltas)]))
+    else:
+        show(ui.hero(eyebrow, "Forecast accuracy on the held-out test split.",
+                     f"Step-1 error is {ui.num(f'{mae[0]:.1f} ns')}; error at step {horizon} is {ui.num(f'{mae[-1]:.1f} ns')}."))
+        if fc_status == 422:
+            st.caption(f"Forecast unavailable for {sat_label}: {fc.get('detail', 'invalid input')}")
+
+    # Actual vs predicted (step 1) and its residual
+    actual = [r[0] / 1e3 for r in ev["actual_ns"]]
+    predicted = [r[0] / 1e3 for r in ev["predicted_ns"]]
+    resid = [(a - p) * 1e3 for a, p in zip(actual, predicted)]
+    n = len(actual)
+    wticks = [(int(i), f"window {int(i)}") for i in np.linspace(0, n - 1, 5).round()] if n > 1 else []
+    body = ui.chart(
+        [dict(name="actual", values=actual, color=ui.TEAL, w=1.6), dict(name="predicted", values=predicted, color=ui.GREY, dash=True, w=1.6)],
+        height=250, x_ticks=wticks, y_unit="\u00b5s", uid="avp", aria="Actual versus predicted clock bias at step 1",
+    ) + ui.chart([dict(name="residual (actual \u2212 predicted)", values=resid, color=ui.ALARM, w=1.3)],
+                 height=170, x_ticks=wticks, y_unit="ns", uid="res", aria="Forecast residual in nanoseconds")
+    if is_navic:
+        body += (f'<p class="ng-note">The clock drifts by tens of \u00b5s across the test period while the model\'s error is only about '
+                 f'{mae[0]:.1f} ns, so the two lines overlap. The residual shows what is left over; judge the forecaster against the baselines below.</p>')
+    pill = ui.pill("within target" if ev["pass_step1"] else "exceeds target", "ok" if ev["pass_step1"] else "bad")
+    show(ui.panel("Predictions track the clock to within " + f"{mae[0]:.1f} ns.", f"Step 1 of {horizon}, scored on {n:,} test windows. "
+                  f"MAE {mae[0]:.2f} ns \u00b7 RMSE {ev['rmse_ns'][0]:.2f} ns.", body, aside=pill))
+
+    # Error by step vs baselines
+    baselines = ev.get("baselines") or {}
+    steps = list(range(1, len(mae) + 1))
+    series = [dict(name=f"{served_kind} (served)", values=mae, color=ui.TEAL, w=2.2)]
+    for k, color in (("broadcast_drift", ui.ALARM), ("ridge", ui.GREY)):
+        if k in baselines and k.replace("_", "-") != served_kind:
+            series.append(dict(name=k.replace("_", " "), values=baselines[k]["mae_ns"], color=color, dash=(k == "ridge"), w=1.6))
+    left_out = " Persistence is left out because its error is off this scale; it is in the table below." if "persistence" in baselines else ""
+    show(ui.panel("Error grows with the forecast horizon.", "Mean absolute error at each step, served model against reference forecasters." + left_out,
+                  ui.chart(series, height=260, x_ticks=[(i, f"step {s}") for i, s in enumerate(steps)], y_unit="ns", uid="steps",
+                           fill=False, aria="Mean absolute error by forecast step")))
+
+    # Baseline table
     if baselines:
-        rows = [(served_kind + " (served)", eval_body["mae_ns"][0], eval_body["mae_ns"][-1])]
-        # The served model can also appear among the baselines (e.g. ridge): don't list it twice.
-        rows += [(k.replace("_", " "), v["mae_ns"][0], v["mae_ns"][-1]) for k, v in baselines.items()
-                 if k.replace("_", "-") != served_kind]
-        best1 = min(r[1] for r in rows)
-        last_step = eval_body["horizon"]
-        body_rows = "".join(
-            f'<tr style="{"font-weight:700;" if abs(r[1] - best1) < 1e-12 else ""}">'
-            f'<td style="padding:4px 14px 4px 0;">{r[0]}</td>'
-            f'<td style="text-align:right;padding:4px 14px;">{r[1]:.2f}</td>'
-            f'<td style="text-align:right;padding:4px 0 4px 14px;">{r[2]:.2f}</td></tr>'
-            for r in sorted(rows, key=lambda r: r[1])
-        )
-        skill = eval_body.get("skill_vs_persistence")
-        skill_txt = (f'<span class="status-pill" style="background:{CARD_MINT if skill > 0 else CARD_PINK};'
-                     f'margin-left:8px;">{skill:+.0%} vs persistence</span>') if skill is not None else ""
-        st.markdown(
-            f"""
-            <div style="background:{CARD_CREAM};border-radius:16px;padding:18px 22px;color:{INK};margin-top:14px;">
-                <div class="card-meta"><span>baseline comparison</span><span>mae (ns)</span></div>
-                <div class="card-title">how does it compare?{skill_txt}</div>
-                <table style="width:100%;font-size:0.86rem;margin-top:8px;border-collapse:collapse;">
-                    <tr style="opacity:0.55;"><td>model</td>
-                        <td style="text-align:right;padding:0 14px;">step 1</td>
-                        <td style="text-align:right;padding-left:14px;">step {last_step}</td></tr>
-                    {body_rows}
-                </table>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        rows = [dict(name=served_kind, m1=mae[0], m_last=mae[-1], served=True)]
+        rows += [dict(name=k.replace("_", " "), m1=v["mae_ns"][0], m_last=v["mae_ns"][-1], served=False)
+                 for k, v in baselines.items() if k.replace("_", "-") != served_kind]
+        skill = ev.get("skill_vs_persistence")
+        aside = ui.pill(f"{skill:+.0%} vs persistence", "ok" if skill > 0 else "bad") if skill is not None else ""
+        show(ui.panel("How does it compare?", "Lower is better. Sorted by step-1 error.", ui.baseline_table(rows, horizon), aside=aside))
 
-    # ── Forecast for the selected satellite (POST /predict) ──
-    pred_body = {"satellite_id": int(satellite_id)} if satellite_id is not None else {}
-    pred_status, pred_resp = api_post("/predict", pred_body)
-    if pred_status == 200 and "clock_bias_s" in df.columns:
-        last_obs_ns = float(df["clock_bias_s"].iloc[-1]) * 1e9
-        deltas = [v - last_obs_ns for v in pred_resp["predicted_clock_bias_ns"]]
-        chips = "".join(
-            f'<span class="status-pill" style="background:{CARD_SKY};margin:2px 6px 2px 0;">'
-            f't+{(i + 1) * step_s / 60:.0f}m: {d:+.1f} ns</span>' for i, d in enumerate(deltas)
-        )
-        st.markdown(
-            f"""
-            <div style="background:{CARD_SKY};border-radius:16px;padding:18px 22px;color:{INK};margin-top:14px;">
-                <div class="card-meta"><span>latest forecast</span><span>{sat_label}</span></div>
-                <div class="card-title">next {len(deltas)} steps, relative to the last observed bias</div>
-                <div style="margin-top:8px;">{chips}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    elif pred_status == 422:
-        st.caption(f"forecast unavailable for {sat_label}: {pred_resp.get('detail', 'invalid input')}")
-elif eval_status == 401:
-    unauthorized_banner()
-elif eval_status == 503:
-    model_not_trained_banner(eval_body.get("message", ""), navic=is_navic)
-elif eval_status is None:
-    api_unreachable_banner(eval_body)
-else:
-    st.error(f"evaluation fetch failed: {eval_body}")
 
-# ── Anomaly report (local LLM via LM Studio) ────────────────────────────────────
-st.markdown('<div class="section-label">anomaly report</div>', unsafe_allow_html=True)
+def page_anomalies():
+    page_header("Anomalies")
+    ev_status, ev = load_eval()
+    if ev_status != 200:
+        eval_error_notice(ev_status, ev)
+        st.caption("The anomaly check needs a trained model first.")
+        return
+    with st.spinner("Running the numeric check" + (" and the local LLM report\u2026" if include_llm else "\u2026")):
+        rep_status, rep = load_report(include_llm)
+    if rep_status is None:
+        api_unreachable_notice(rep)
+        return
+    if rep_status == 401:
+        unauthorized_notice()
+        return
+    if rep_status != 200:
+        show(ui.notice("error", "The anomaly report failed", ui.esc(str(rep))))
+        return
 
-if eval_status == 200:
-    with st.spinner("running numeric check" + (" + local llm reasoning..." if include_llm else "...")):
-        report_status, report_body = api_post(
-            "/anomaly-report", {"include_llm": include_llm, **sat_scope}, timeout=ANOMALY_REPORT_TIMEOUT_S
-        )
-
-    if report_status == 200:
-        llm_status = report_body["llm_status"]
-        breach = report_body["threshold_breach"]
-        pill_bg = CARD_PINK if breach else CARD_MINT
-
-        st.markdown(
-            f"""
-            <div style="background:{CARD_CREAM};border-radius:16px;padding:18px 22px;color:{INK};">
-                <div class="card-meta">
-                    <span>numeric check</span>
-                    <span class="status-pill" style="background:{pill_bg};">
-                        {'threshold breached' if breach else 'nominal'}
-                    </span>
-                </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # ── Residual anomaly detector (deterministic; runs with or without the LLM) ──
-        det = report_body.get("detection")
-        if det:
-            sev_colors = {"nominal": CARD_MINT, "watch": CARD_YELLOW, "anomalous": CARD_PINK}
-            ra = det.get("refit_aware")  # navic profile only; None on the synthetic profile
-
-            def draw_timeline(z_vals, thr, title, red_idx, red_label, grey_idx=None):
-                """|robust z| per test window, threshold line, grey dots (refit/edge), red dots (alarms)."""
-                z_abs = pd.Series(z_vals).abs().values
-                n = len(z_abs)
-                red = [i for i in red_idx if 0 <= i < n]
-                grey = [i for i in (grey_idx or []) if 0 <= i < n]
-                fig, ax = plt.subplots(figsize=(11, 3.2), facecolor=CARD_CREAM)
-                ax.set_facecolor(CARD_CREAM)
-                ax.axhspan(0, thr, color=CARD_MINT, alpha=0.30)
-                ax.plot(z_abs, color=INK, lw=1.4, solid_capstyle="round", label="|robust z|")
-                ax.axhline(thr, color="#c0392b", lw=1.4, ls="--", label=f"threshold ({thr:.1f})")
-                if grey:
-                    ax.scatter(grey, z_abs[grey], color="#9a9a9a", s=22, zorder=3,
-                               label=f"refit / edge ({len(grey)})")
-                if red:
-                    ax.scatter(red, z_abs[red], color="#c0392b", s=26, zorder=4,
-                               label=f"{red_label} ({len(red)})")
-                ax.set_title(title, fontsize=9, color=INK, loc="left")
-                ax.set_xlabel("test window", fontsize=8, color=INK, alpha=0.45)
-                ax.set_ylabel("|robust z|", fontsize=8, color=INK, alpha=0.45)
-                ax.tick_params(colors=INK, labelsize=7, length=0)
-                ax.legend(fontsize=8, frameon=False, labelcolor=INK, loc="upper right")
-                for spine in ax.spines.values():
-                    spine.set_visible(False)
-                ax.grid(alpha=0.12, linestyle="-", color=INK)
-                fig.tight_layout(pad=0.8)
-                return fig
-
-            if ra:
-                # Refit-aware detector is the main verdict: routine refits are shown but don't alarm.
-                sev_bg = sev_colors.get(ra["severity"], CARD_CREAM)
-                sc = ra["shape_counts"]
-
-                def plural(n, word):
-                    return f"{n} {word}" if n == 1 else f"{n} {word}s"
-
-                parts = [plural(sc.get("refit", 0), "refit"), plural(sc.get("spike", 0), "spike"),
-                         f"{sc.get('sustained', 0)} sustained"]
-                if sc.get("edge", 0):
-                    parts.append(f"{sc['edge']} edge")
-                summary = f"{plural(ra['n_jumps'], 'jump')}: {', '.join(parts)} → {plural(ra['n_alarms'], 'alarm')}"
-                st.markdown(
-                    f"""
-                    <div class="card-title" style="margin-top:6px;">residual anomaly detector
-                        <span class="status-pill" style="background:{sev_bg};margin-left:8px;">{ra['severity']}</span>
-                    </div>
-                    <div class="card-sub" style="margin-top:6px;line-height:1.55;">
-                        {summary}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                if ra.get("z_scores"):
-                    grey_idx = [e["index"] for e in ra["events"] if e["label"] in ("refit", "edge")]
-                    fig = draw_timeline(
-                        ra["z_scores"], ra["z_threshold"],
-                        f"{ra['severity']} · {plural(ra['n_alarms'], 'alarm')}", ra["alarm_indices"], "alarm", grey_idx,
-                    )
-                    st.pyplot(fig, width="stretch")
-                    plt.close(fig)
-                st.caption(
-                    "scored on the broadcast-drift residual. jumps shaped like routine ground-segment refits "
-                    "(isolated level shifts, grey) are reported but do not alarm; only spikes and sustained "
-                    "excursions (red) do. alarms are candidates for review, not confirmed faults."
-                )
-                st.caption(
-                    f"raw detector (no refit handling): {det['severity']} · {det['n_flagged']} of "
-                    f"{det['n_scored']} windows above |z| {det['z_threshold']:.1f} · largest |z| = "
-                    f"{det['max_abs_z']:.1f} — over-flags routine refits"
-                )
-            else:
-                # No refit_aware block (synthetic profile): original card and timeline.
-                sev_bg = sev_colors.get(det["severity"], CARD_CREAM)
-                st.markdown(
-                    f"""
-                    <div class="card-title" style="margin-top:6px;">residual anomaly detector
-                        <span class="status-pill" style="background:{sev_bg};margin-left:8px;">{det['severity']}</span>
-                    </div>
-                    <div class="card-sub" style="margin-top:6px;line-height:1.55;">
-                        {det['n_flagged']} of {det['n_scored']} test windows flagged
-                        (|robust z| &gt; {det['z_threshold']:.1f}) · largest |z| = {det['max_abs_z']:.1f}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                if det.get("z_scores"):
-                    fig = draw_timeline(
-                        det["z_scores"], det["z_threshold"],
-                        f"{det['severity']} · {det['n_flagged']} of {det['n_scored']} windows flagged",
-                        det.get("flagged_indices") or [], "flagged",
-                    )
-                    st.pyplot(fig, width="stretch")
-                    plt.close(fig)
-        if report_body["llm_report"]:
-            def format_report(text: str) -> str:
-                """Escape LLM text, then bold the label before the colon on each line (Status:, Accuracy:, ...)."""
-                out = []
-                for line in text.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    label, sep, rest = line.partition(":")
-                    if sep and 0 < len(label) <= 20:
-                        out.append(f"<b>{html.escape(label.strip())}:</b> {html.escape(rest.strip())}")
-                    else:
-                        out.append(html.escape(line))
-                return "<br>".join(out)
-
-            st.markdown(
-                f'<div class="card-title">operator report</div>'
-                f'<div class="card-sub" style="opacity:0.85;margin-top:6px;line-height:1.5;">'
-                f'{format_report(report_body["llm_report"])}</div>',
-                unsafe_allow_html=True,
-            )
-            if report_body["llm_severity"]:
-                sev = report_body["llm_severity"]
-                st.markdown(
-                    f'<div class="card-sub" style="margin-top:10px;">'
-                    f'<b>llm severity:</b> {html.escape(str(sev.get("severity", "unknown")))} — '
-                    f'{html.escape(str(sev.get("reasoning", "")))}</div>',
-                    unsafe_allow_html=True,
-                )
+    s = summarize_detection(rep.get("detection"))
+    breach = rep["threshold_breach"]
+    eyebrow = f"{sat_label} \u00b7 residual anomaly detector"
+    if s:
+        head = (f"No alarms in {s['n_scored']:,} test windows." if s["alarms"] == 0
+                else f"{ui.plural(s['alarms'], 'alarm')} in {s['n_scored']:,} test windows.")
+        if s["kind"] == "refit":
+            sub = (f"{ui.num(ui.plural(s['refits'], 'routine refit'))} and {ui.num(ui.plural(s['edge'], 'edge jump'))} were set aside. "
+                   f"The raw detector alone would have flagged {ui.num(s['raw_flagged'])} windows.")
         else:
-            st.markdown(
-                f'<div class="card-sub" style="opacity:0.7;margin-top:6px;">'
-                f'llm report unavailable — {llm_status}</div>',
-                unsafe_allow_html=True,
+            largest = ui.num(f"{s['raw_max']:.1f}")
+            sub = f"{ui.num(s['alarms'])} of {s['n_scored']:,} windows exceeded |robust z| {s['thr']:.1f}; the largest was {largest}."
+        show(ui.hero(eyebrow, head, sub))
+        verdict = ui.pill(s["severity"], SEV_TONE.get(s["severity"], "neutral")) + " " + \
+            ui.pill("threshold breached" if breach else "numeric check nominal", "bad" if breach else "ok")
+        show(f'<div style="padding:6px 6px 2px">{verdict}</div>')
+
+        if s["z"]:
+            z = [abs(v) for v in s["z"]]
+            grey = [e["index"] for e in s["events"] if e["label"] in ("refit", "edge")]
+            n = len(z)
+            wticks = [(int(i), f"window {int(i)}") for i in np.linspace(0, n - 1, 6).round()] if n > 1 else []
+            if s["kind"] == "refit":
+                summary = (f"{ui.plural(s['jumps'], 'jump')}: {ui.plural(s['refits'], 'refit')}, {ui.plural(s['spikes'], 'spike')}, "
+                           f"{s['sustained']} sustained" + (f", {s['edge']} edge" if s["edge"] else "")
+                           + f" \u2192 {ui.plural(s['alarms'], 'alarm')}")
+                dots = [dict(series=0, idx=grey, color=ui.GREY, label=f"refit / edge ({len(grey)})")] if grey else []
+                dots += [dict(series=0, idx=s["alarm_idx"], color=ui.ALARM, label=f"alarm ({len(s['alarm_idx'])})", r=5)] if s["alarm_idx"] else []
+                note = ("Scored on the broadcast-drift residual. Jumps shaped like routine ground-segment refits (isolated level "
+                        "shifts, grey) are reported but do not alarm; only spikes and sustained excursions (red) do. "
+                        "Alarms are candidates for review, not confirmed faults.")
+            else:
+                summary = f"{s['alarms']} of {s['n_scored']:,} test windows flagged"
+                dots = [dict(series=0, idx=s["alarm_idx"], color=ui.ALARM, label=f"flagged ({len(s['alarm_idx'])})", r=5)] if s["alarm_idx"] else []
+                note = "Windows are flagged when |robust z| crosses the threshold."
+            chart_html = ui.chart(
+                [dict(name="|robust z|", values=z, color=ui.TEAL, w=1.4)], height=320, x_ticks=wticks, y_unit="|z|", dots=dots,
+                hlines=[dict(y=s["thr"], label=f"threshold {s['thr']:.1f}", color=ui.ALARM)], uid="zt",
+                aria="Absolute robust z-score for each test window with the alarm threshold",
             )
-        st.markdown("</div>", unsafe_allow_html=True)
-    elif report_status is None:
-        api_unreachable_banner(report_body)
-    elif report_status == 401:
-        unauthorized_banner()
+            raw_line = ""
+            if s["kind"] == "refit":
+                raw_line = (f'<p class="ng-note">Raw detector without refit handling: {ui.esc(s["raw_severity"])}, {s["raw_flagged"]} of '
+                            f'{s["n_scored"]:,} windows above |z| {s["raw_thr"]:.1f}, largest |z| {s["raw_max"]:.1f}. It over-flags routine refits.</p>')
+            show(ui.panel("Residual timeline", summary, chart_html + f'<p class="ng-note">{ui.esc(note)}</p>' + raw_line,
+                          aside=ui.pill(s["severity"], SEV_TONE.get(s["severity"], "neutral"))))
     else:
-        st.error(f"anomaly report fetch failed: {report_body}")
-else:
-    st.caption("anomaly report needs a trained model first.")
+        show(ui.hero(eyebrow, "The numeric check ran.", "The API returned no detector output for this satellite."))
 
-# ── Side-by-side satellite comparison ──────────────────────────────────────────
-# Calls the existing /telemetry and /predict/evaluate endpoints once per satellite
-# (no backend changes needed) and shows I02, I09 and I10 next to each other.
-if is_navic and len(satellites) > 1:
-    st.markdown("---")
-    st.markdown("### satellite comparison")
+    # Operator brief (local LLM, optional)
+    if rep.get("llm_report"):
+        body = ui.brief(rep["llm_report"], rep.get("llm_severity"))
+        show(ui.panel("Operator brief", "Written by the local model from the numbers above. It describes the results and never computes them.", body))
+    else:
+        show(ui.panel("Operator brief", f"Unavailable: {rep['llm_status']}.",
+                      '<p class="ng-note">The numeric results above do not depend on the language model. '
+                      'Turn on \u201cLocal LLM operator brief\u201d in the sidebar and start LM Studio to get a written summary.</p>'))
 
-    # Compare I02, I09, I10 when available; otherwise fall back to every satellite the API lists.
+
+def page_satellites():
+    page_header("Satellites")
     compare_ids = [s for s in (2, 9, 10) if s in satellites] or list(satellites)
-    compare_colors = [CARD_SKY, CARD_PINK, CARD_MINT, CARD_YELLOW]
-    line_colors = [INK, "#c0392b", "#2a7f62", "#b8860b"]
-
-    @st.cache_data(ttl=60, show_spinner=False)
-    def fetch_satellite(sat_id: int, limit: int):
-        """One satellite's telemetry + evaluation. Cached so reruns don't re-hit the API."""
-        t_status, t_body = api_get("/telemetry", limit=limit, satellite_id=sat_id)
-        e_status, e_body = api_get("/predict/evaluate", satellite_id=sat_id)
-        return t_status, t_body, e_status, e_body
-
     results = {}
-    with st.spinner("loading satellites..."):
+    with st.spinner("Loading satellites\u2026"):
         for sid in compare_ids:
-            results[sid] = fetch_satellite(int(sid), telemetry_limit)
+            results[sid] = (cached_get("/telemetry", (("limit", telemetry_limit), ("satellite_id", int(sid)))),
+                            cached_get("/predict/evaluate", (("satellite_id", int(sid)),)))
 
-    # 1) Summary table: one row per satellite
-    summary_rows = []
-    for sid, (t_status, t_body, e_status, e_body) in results.items():
-        row = {"satellite": f"I{int(sid):02d}"}
-        row["samples"] = t_body.get("n_rows") if t_status == 200 else None
+    rows, errs = [], {}
+    for sid, ((t_status, t_body), (e_status, e_body)) in results.items():
+        r = dict(satellite=f"I{int(sid):02d}", samples=t_body.get("n_rows") if t_status == 200 else None,
+                 mae1=None, mae_last=None, rmse1=None, skill=None)
         if e_status == 200:
-            row["mae step 1 (ns)"] = round(e_body["mae_ns"][0], 2)
-            row["mae last step (ns)"] = round(e_body["mae_ns"][-1], 2)
-            row["rmse step 1 (ns)"] = round(e_body["rmse_ns"][0], 2)
-            skill = e_body.get("skill_vs_persistence")
-            row["skill vs persistence"] = round(skill, 3) if skill is not None else None
-        else:
-            row["mae step 1 (ns)"] = row["mae last step (ns)"] = None
-            row["rmse step 1 (ns)"] = row["skill vs persistence"] = None
-        summary_rows.append(row)
-    st.dataframe(pd.DataFrame(summary_rows).set_index("satellite"), width="stretch")
+            r.update(mae1=e_body["mae_ns"][0], mae_last=e_body["mae_ns"][-1], rmse1=e_body["rmse_ns"][0],
+                     skill=e_body.get("skill_vs_persistence"))
+            errs[sid] = e_body["mae_ns"]
+        rows.append(r)
 
-    # 2) Clock bias, one column per satellite
-    st.markdown("**clock bias (latest rows)**")
-    cols = st.columns(len(compare_ids))
-    for i, (col, sid) in enumerate(zip(cols, compare_ids)):
-        t_status, t_body, _, _ = results[sid]
-        with col:
-            st.caption(f"I{int(sid):02d}")
-            if t_status == 200 and t_body["rows"]:
-                sat_df = pd.DataFrame(t_body["rows"])
-                # change from the first sample, in ns, so differences are visible
-                # (absolute bias is ~500 us and looks flat on a zero-based axis)
-                bias_ns = (sat_df["clock_bias_s"] - sat_df["clock_bias_s"].iloc[0]) * 1e9
-                st.pyplot(
-                    pudding_plot(bias_ns, "ns from first sample", compare_colors[i % len(compare_colors)]),
-                    width="stretch",
-                )
-            else:
-                st.warning(f"no telemetry (status {t_status})")
-
-    # 3) Forecast error vs step, one line per satellite
-    st.markdown("**forecast error by step (test split)**")
-    fig, ax = plt.subplots(figsize=(11, 3.2), facecolor=CARD_CREAM)
-    ax.set_facecolor(CARD_CREAM)
-    plotted = False
-    for i, sid in enumerate(compare_ids):
-        _, _, e_status, e_body = results[sid]
-        if e_status == 200:
-            steps = range(1, len(e_body["mae_ns"]) + 1)
-            ax.plot(steps, e_body["mae_ns"], lw=2.0, marker="o", ms=3,
-                    color=line_colors[i % len(line_colors)], label=f"I{int(sid):02d}")
-            plotted = True
-    if plotted:
-        ax.set_xlabel("forecast step", fontsize=8, color=INK, alpha=0.45)
-        ax.set_ylabel("MAE (ns)", fontsize=8, color=INK, alpha=0.45)
-        ax.tick_params(colors=INK, labelsize=7, length=0)
-        ax.legend(fontsize=8, frameon=False, labelcolor=INK)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.grid(alpha=0.12, linestyle="-", color=INK)
-        fig.tight_layout(pad=0.8)
-        st.pyplot(fig, width="stretch")
+    scored = [r for r in rows if r["mae1"] is not None]
+    if scored:
+        best = min(scored, key=lambda r: r["mae1"])
+        worst = max(scored, key=lambda r: r["mae1"])
+        lasts = [r["mae_last"] for r in scored]
+        sub = (f"Step-1 error runs from {ui.num(format(best['mae1'], '.1f') + ' ns')} on {ui.esc(best['satellite'])} to "
+               f"{ui.num(format(worst['mae1'], '.1f') + ' ns')} on {ui.esc(worst['satellite'])}. Error at the last step runs from "
+               f"{ui.num(format(min(lasts), '.1f') + ' ns')} to {ui.num(format(max(lasts), '.1f') + ' ns')}.")
+        show(ui.hero(f"{len(compare_ids)} satellites \u00b7 {served_kind}", f"{best['satellite']} has the lowest forecast error.", sub))
     else:
-        st.caption("evaluation unavailable for these satellites (is the model trained?)")
+        show(ui.hero("Satellites", "Satellite comparison", "Evaluation isn't available yet. Train the model first."))
+    show(ui.panel("Summary", "One row per satellite. Lower error is better; skill is measured against persistence.", ui.sat_table(rows)))
 
-# ── Footer ─────────────────────────────────────────────────────────────────────
-_footer_detail = (
-    f"{served_kind} · level-free windows · real broadcast clocks"
-    if is_navic else "attention-lstm(64→32) · minmax scaler · synthetic telemetry"
-)
-st.markdown(
-    f"""
-<div style="text-align:center;font-size:0.76rem;color:#666;margin-top:36px;
-            font-family:Inter,sans-serif;line-height:1.6;">
-    naviguard · navic/irnss · {_footer_detail} · dept. of ai &amp; ds, bmsce 2025–26
-</div>
-""",
-    unsafe_allow_html=True,
-)
+    cols = st.columns(len(compare_ids), gap="medium")
+    for i, (col, sid) in enumerate(zip(cols, compare_ids)):
+        (t_status, t_body), _ = results[sid]
+        with col:
+            label = f"I{int(sid):02d}"
+            if t_status == 200 and t_body["rows"]:
+                sdf = pd.DataFrame(t_body["rows"])
+                try:
+                    dev, jumps = ui.broadcast_deviation_ns(sdf)
+                    ticks, names = ui.time_axis(sdf, 3)
+                    show(ui.panel(label, f"Clock vs broadcast drift \u00b7 {ui.plural(len(jumps), 'jump')} over 4\u03c3 \u00b7 peak {np.max(np.abs(dev)):,.0f} ns",
+                                  ui.chart([dict(values=dev.tolist(), color=ui.LINE_COLORS[i % 4])], height=210, x_ticks=ticks, width=380, font=14,
+                                           x_names=names, y_unit="ns", uid=f"sat{i}", aria=f"{label} clock versus broadcast drift",
+                                           dots=[dict(series=0, idx=jumps, color=ui.GREY, label="")] if jumps else [])
+                                  ).replace('class="ng-panel"', 'class="ng-panel compact"'))
+                except (KeyError, ValueError):
+                    show(ui.notice("warn", f"{label}: no drift data", "This satellite's rows lack the drift or timestamp columns."))
+            else:
+                show(ui.notice("warn", f"{label}: no telemetry", f"The API answered with status {t_status}."))
+
+    # Raw clock bias, one panel per satellite: change from the first sample (absolute bias is ~500 \u00b5s and looks flat).
+    bias_cols = st.columns(len(compare_ids), gap="medium")
+    for i, (col, sid) in enumerate(zip(bias_cols, compare_ids)):
+        (t_status, t_body), _ = results[sid]
+        with col:
+            label = f"I{int(sid):02d}"
+            if t_status == 200 and t_body["rows"]:
+                sdf = pd.DataFrame(t_body["rows"])
+                if "clock_bias_s" in sdf.columns and len(sdf) >= 2:
+                    bias_ns = ((sdf["clock_bias_s"] - sdf["clock_bias_s"].iloc[0]) * 1e9).tolist()
+                    ticks, names = ui.time_axis(sdf, 3)
+                    show(ui.panel(f"{label} clock bias", "Change from the first sample, in ns.",
+                                  ui.chart([dict(values=bias_ns, color=ui.LINE_COLORS[i % 4])], height=210, x_ticks=ticks,
+                                           x_names=names, width=380, font=14, y_unit="ns", uid=f"bias{i}",
+                                           aria=f"{label} clock bias change from the first sample")
+                                  ).replace('class="ng-panel"', 'class="ng-panel compact"'))
+                else:
+                    show(ui.notice("warn", f"{label}: no bias data", "This satellite's rows lack the clock bias column."))
+
+    if errs:
+        series = [dict(name=f"I{int(sid):02d}", values=v, color=ui.LINE_COLORS[i % 4], w=2.0) for i, (sid, v) in enumerate(errs.items())]
+        h = max(len(v) for v in errs.values())
+        show(ui.panel("Forecast error by step", "Mean absolute error on each satellite's test split.",
+                      ui.chart(series, height=280, fill=False, y_unit="ns", x_ticks=[(i, f"step {i + 1}") for i in range(h)],
+                               uid="cmp", aria="Mean absolute error by forecast step for each satellite")))
+
+
+{"Overview": page_overview, "Forecast": page_forecast, "Anomalies": page_anomalies, "Satellites": page_satellites}[view]()
+
+show(ui.footer(
+    f"naviguard \u00b7 navic/irnss \u00b7 {served_kind} \u00b7 level-free windows \u00b7 real broadcast clocks \u00b7 dept. of ai & ds, bmsce 2025\u201326"
+    if is_navic else
+    "naviguard \u00b7 navic/irnss \u00b7 attention-lstm(64\u219232) \u00b7 minmax scaler \u00b7 synthetic telemetry \u00b7 dept. of ai & ds, bmsce 2025\u201326"
+))

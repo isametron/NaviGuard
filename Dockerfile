@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e ".[frontend]"
 
 COPY frontend ./frontend
+COPY .streamlit ./.streamlit
 COPY scripts ./scripts
 
 # data/, models/ and outputs/ are mounted from the host at run time (see docker-compose.yml).
