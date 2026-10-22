@@ -45,8 +45,9 @@ def overlapping_allan_deviation(
     segment_counts = np.zeros(max_m, dtype=np.int64)
 
     for start, end in zip(segment_bounds[:-1], segment_bounds[1:]):
-        bias = clock_bias_s[start:end]
-        bias = bias - bias[0]
+        seg_t = t[start:end]
+        grid = np.arange(seg_t[0], seg_t[-1] + 1e-9, cadence_s)    # exact cadence, so m samples = m * cadence_s
+        bias = np.interp(grid, seg_t, clock_bias_s[start:end])
         for m in range(1, min(max_m, (len(bias) - 1) // 2) + 1):
             second_differences = bias[2 * m:] - 2 * bias[m:-m] + bias[:-2 * m]
             sums_squared[m - 1] += np.dot(second_differences, second_differences)
