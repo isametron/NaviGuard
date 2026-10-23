@@ -158,7 +158,7 @@ with st.sidebar:
             rows += [(n.replace("_", "-"), f"{c['val_mae_ns']:.2f} ns")
                      for n, c in (model_info.get("candidates") or {}).items()]
             notes.append("Validation MAE per candidate. The served model was selected on validation only.")
-            notes.append("Real broadcast clocks (DLR BRDM via BKG): what the satellite broadcasts, not a precise clock product.")
+            notes.append("Real broadcast clocks (DLR BRDM via BKG/ESA): what the satellite broadcasts, not a precise clock product.")
         else:
             notes.append("LSTM(64) \u2192 Dropout(0.2) \u2192 LSTM(32) \u2192 Attention(32) \u2192 Dense(16) \u2192 Dense(horizon)")
         rows += [("window", f"{model_info['seq_len']} samples"), ("horizon", f"{model_info['horizon']} steps")]
@@ -464,7 +464,7 @@ def page_anomalies():
                 else f"{ui.plural(s['alarms'], 'alarm')} in {s['n_scored']:,} test windows.")
         if s["kind"] == "refit":
             sub = (f"{ui.num(ui.plural(s['refits'], 'routine refit'))} and {ui.num(ui.plural(s['edge'], 'edge jump'))} were set aside. "
-                   f"The raw detector alone would have flagged {ui.num(s['raw_flagged'])} windows.")
+                   f"The raw detector alone would have flagged {ui.num(ui.plural(s['raw_flagged'], 'window'))}.")
         else:
             largest = ui.num(f"{s['raw_max']:.1f}")
             sub = f"{ui.num(s['alarms'])} of {s['n_scored']:,} windows exceeded |robust z| {s['thr']:.1f}; the largest was {largest}."
@@ -597,7 +597,7 @@ def page_satellites():
 {"Overview": page_overview, "Forecast": page_forecast, "Anomalies": page_anomalies, "Satellites": page_satellites}[view]()
 
 show(ui.footer(
-    f"naviguard \u00b7 navic/irnss \u00b7 {served_kind} \u00b7 level-free windows \u00b7 real broadcast clocks \u00b7 dept. of ai & ds, bmsce 2025\u201326"
+    f"naviguard \u00b7 navic/irnss \u00b7 {served_kind} \u00b7 level-free windows \u00b7 real broadcast clocks \u00b7 dept. of ai & ds, bmsce 2026\u201327"
     if is_navic else
-    "naviguard \u00b7 navic/irnss \u00b7 attention-lstm(64\u219232) \u00b7 minmax scaler \u00b7 synthetic telemetry \u00b7 dept. of ai & ds, bmsce 2025\u201326"
+    "naviguard \u00b7 navic/irnss \u00b7 attention-lstm(64\u219232) \u00b7 minmax scaler \u00b7 synthetic telemetry \u00b7 dept. of ai & ds, bmsce 2026\u201327"
 ))
