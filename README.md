@@ -199,6 +199,7 @@ then `... naviguard train-navic` once.
 | `train-navic`                      | train + select a model on real data for the `navic` profile                                                   |
 | `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`, `--extend`, `--params`) |
 | `tune`                             | settings search for ridge and the neural models, using only data before the first test block (`--trials`, `--resume`) |
+| `intervals`                        | 90% split-conformal forecast ranges from a finished benchmark, no refitting (`--bench-dir`, `--alpha`)        |
 | `anomaly-eval`                     | detector evaluation: injected faults + real events vs metadata                                                |
 | `report`                           | figures and LaTeX tables from benchmark/anomaly outputs                                                       |
 | `serve` / `clean`                  | run the API / remove generated artifacts                                                                      |

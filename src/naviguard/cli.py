@@ -114,6 +114,17 @@ def _cmd_coverage(args):
     print("[coverage] ✓ Complete")
 
 
+def _cmd_intervals(args):
+    from naviguard.benchmark.intervals import build_interval_report
+
+    res = build_interval_report(args.bench_dir, args.out_dir, alpha=args.alpha)
+    for (sat, model), g in res[res["step"] == 1].groupby(["satellite", "model"]):
+        r = g.iloc[0]
+        print(f"[intervals] I{sat:02d} {model:<16} step 1: coverage {100 * r.coverage:5.1f}%  width {r.width:8.2f} ns")
+    print(f"[intervals] Saved: {os.path.join(args.out_dir or args.bench_dir, 'intervals.md')}")
+    print("[intervals] ✓ Complete")
+
+
 def _cmd_benchmark(args):
     from naviguard.benchmark.models import ALL_MODELS
     from naviguard.benchmark.run import extend_benchmark, run_benchmark, run_pooled_benchmark
@@ -295,6 +306,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_cov.add_argument("--min-windows", type=int, default=200, dest="min_windows",
                        help="minimum gap-free windows required for a satellite to qualify")
     p_cov.set_defaults(func=_cmd_coverage)
+
+    p_int = sub.add_parser("intervals", help="Split-conformal forecast ranges from a finished benchmark's predictions")
+    p_int.add_argument("--bench-dir", type=str, required=True, dest="bench_dir",
+                       help="benchmark output folder with predictions_Ixx.npz")
+    p_int.add_argument("--out-dir", type=str, default=None, dest="out_dir", help="default: the benchmark folder")
+    p_int.add_argument("--alpha", type=float, default=0.1, help="miss rate; 0.1 gives 90%% ranges")
+    p_int.set_defaults(func=_cmd_intervals)
 
     p_bench = sub.add_parser("benchmark", help="Rolling-origin benchmark of forecasters on real NavIC series")
     p_bench.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
