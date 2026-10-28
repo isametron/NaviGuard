@@ -56,3 +56,61 @@ def test_coverage_rejects_invalid_horizon(tmp_path, capsys):
     rc = main(["coverage", "--csv", str(source), "--horizons", "1,0"])
     assert rc == 1
     assert "positive integers" in capsys.readouterr().err
+
+
+def test_overlapping_allan_deviation_matches_quadratic_time_error():
+    from naviguard.benchmark.allan import overlapping_allan_deviation
+
+    cadence_s = 912.0
+    t = np.arange(10) * cadence_s
+    result = overlapping_allan_deviation(t, t**2, max_tau_s=3 * cadence_s)
+
+    np.testing.assert_allclose(result["tau_s"], cadence_s * np.arange(1, 4))
+    np.testing.assert_allclose(result["allan_deviation"], np.sqrt(2) * result["tau_s"])
+
+
+def test_overlapping_allan_deviation_does_not_use_cross_gap_samples():
+    from naviguard.benchmark.allan import overlapping_allan_deviation
+
+    cadence_s = 10.0
+    first_t = np.arange(8) * cadence_s
+    second_t = 10_000 + np.arange(8) * cadence_s
+    t = np.r_[first_t, second_t]
+    bias = np.r_[first_t, second_t + 100]
+    result = overlapping_allan_deviation(t, bias, max_tau_s=3 * cadence_s)
+
+    assert (result["gap_free_stretches"] == 2).all()
+    np.testing.assert_allclose(result["allan_deviation"], 0, atol=1e-12)
+
+
+def test_allan_cli_writes_reports_for_requested_satellites(tmp_path):
+    frames = []
+    for sat in (2, 9, 10):
+        timestamps = np.arange(200, dtype=float) * 912
+        frames.append(pd.DataFrame({
+            "satellite_id": sat,
+            "timestamp_s": timestamps,
+            "clock_bias_s": timestamps**2 * 1e-16,
+            "clock_drift_s_per_s": np.zeros(len(timestamps)),
+        }))
+    source = tmp_path / "telemetry.csv"
+    pd.concat(frames).to_csv(source, index=False)
+
+    out_dir = tmp_path / "allan"
+    assert main(["allan", "--csv", str(source), "--out-dir", str(out_dir)]) == 0
+
+    for sat in (2, 9, 10):
+        csv_path = out_dir / f"allan_I{sat:02d}.csv"
+        plot_path = out_dir / f"allan_I{sat:02d}.png"
+        result = pd.read_csv(csv_path)
+        assert result["tau_s"].iloc[0] == 912
+        assert result["tau_s"].max() >= 86_400
+        assert plot_path.stat().st_size > 0
+
+
+def test_allan_deviation_is_zero_for_a_perfect_clock_with_uneven_spacing():
+    from naviguard.benchmark.allan import overlapping_allan_deviation
+
+    t = np.cumsum(np.r_[0, np.tile([912, 912, 912, 864], 50)]).astype(float)
+    result = overlapping_allan_deviation(t, 4e-11 * t, max_tau_s=4 * 912)
+    np.testing.assert_allclose(result["allan_deviation"], 0, atol=1e-15)

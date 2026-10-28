@@ -196,6 +196,7 @@ then `... naviguard train-navic` once.
 | `pipeline`                         | generate → preprocess → train → predict                                                                       |
 | `fetch`                            | download real NavIC broadcast clocks (`--start/--end` or `--days`, `--min-records`, `--keep-raw`, `--source`) |
 | `coverage`                         | per-satellite sample/gap summary and gap-aware eligibility by forecast horizon                                |
+| `allan`                            | gap-aware overlapping Allan deviation for I02, I09, and I10 clock bias                                        |
 | `train-navic`                      | train + select a model on real data for the `navic` profile                                                   |
 | `benchmark`                        | rolling-origin benchmark (`--horizon`, `--seq-len`, `--folds`, `--seeds`, `--models`, `--pooled`, `--resume`, `--extend`, `--params`) |
 | `tune`                             | settings search for ridge and the neural models, using only data before the first test block (`--trials`, `--resume`) |
@@ -217,6 +218,15 @@ then `... naviguard train-navic` once.
 - [ ] Review `outputs/coverage/coverage.md` and the detailed `outputs/coverage/coverage.csv`.
 
 The coverage report counts a gap when the interval exceeds 1.5× the satellite's median cadence.
+
+For overlapping Allan deviation, the default command writes one CSV and one log-log plot per
+satellite under `outputs/allan/`. It uses `clock_bias_s` as the time-error series, splits the data
+at gaps exceeding 1.5× the median cadence, and computes averaging times from one sample (912 s for
+the six-month telemetry file) through at least one day:
+
+```bash
+naviguard allan --csv data/navic_telemetry_6mo.csv --out-dir outputs/allan
+```
 Horizon qualification requires at least 200 complete gap-free windows, using the configured
 sequence length (default 20 samples) and the forecast horizons 1, 6, 12, and 24 samples.
 
