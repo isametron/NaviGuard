@@ -114,7 +114,6 @@ def _cmd_coverage(args):
     print("[coverage] ✓ Complete")
 
 
-<<<<<<< HEAD
 def _cmd_intervals(args):
     from naviguard.benchmark.intervals import build_interval_report
 
@@ -124,7 +123,8 @@ def _cmd_intervals(args):
         print(f"[intervals] I{sat:02d} {model:<16} step 1: coverage {100 * r.coverage:5.1f}%  width {r.width:8.2f} ns")
     print(f"[intervals] Saved: {os.path.join(args.out_dir or args.bench_dir, 'intervals.md')}")
     print("[intervals] ✓ Complete")
-=======
+
+
 def _cmd_allan(args):
     from naviguard.benchmark.allan import build_allan_deviation_reports
 
@@ -133,7 +133,6 @@ def _cmd_allan(args):
         print(f"[allan] CSV report: {csv_path}")
         print(f"[allan] Plot       : {plot_path}")
     print("[allan] ✓ Complete")
->>>>>>> origin/feature/overlapping-allan-deviation
 
 
 def _cmd_benchmark(args):
@@ -318,19 +317,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="minimum gap-free windows required for a satellite to qualify")
     p_cov.set_defaults(func=_cmd_coverage)
 
-<<<<<<< HEAD
     p_int = sub.add_parser("intervals", help="Split-conformal forecast ranges from a finished benchmark's predictions")
     p_int.add_argument("--bench-dir", type=str, required=True, dest="bench_dir",
                        help="benchmark output folder with predictions_Ixx.npz")
     p_int.add_argument("--out-dir", type=str, default=None, dest="out_dir", help="default: the benchmark folder")
     p_int.add_argument("--alpha", type=float, default=0.1, help="miss rate; 0.1 gives 90%% ranges")
     p_int.set_defaults(func=_cmd_intervals)
-=======
+
     p_allan = sub.add_parser("allan", help="Compute gap-aware overlapping Allan deviation for NavIC clock bias")
     p_allan.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry_6mo.csv"))
     p_allan.add_argument("--out-dir", type=str, default=os.path.join(cfg.OUTPUTS_DIR, "allan"), dest="out_dir")
     p_allan.set_defaults(func=_cmd_allan)
->>>>>>> origin/feature/overlapping-allan-deviation
 
     p_bench = sub.add_parser("benchmark", help="Rolling-origin benchmark of forecasters on real NavIC series")
     p_bench.add_argument("--csv", type=str, default=os.path.join(cfg.DATA_DIR, "navic_telemetry.csv"))
