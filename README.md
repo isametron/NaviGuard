@@ -26,9 +26,18 @@
 
 ## Key findings
 
-Real data: 68 days (15 Jul – 21 Sep 2026) of broadcast clocks for three NavIC satellites (I02: 6,633
-samples, I09: 2,379, I10: 2,699; ~912 s cadence). MAE in nanoseconds, walk-forward evaluation over 3
-folds; neural models are averaged over 3 seeds (± = seed std).
+**Six-month update.** A rerun on 14 Apr – 19 Oct 2026 (31,562 records: I02 18,169, I09 6,361, I10 7,032)
+with the same settings supersedes the 68-day tables below where they differ. Broadcast drift is still best
+on average at 1.5 h (3.9 ns at step 1). On I02 the attention-LSTM is best up to 1.5 h, significant by both
+tests (9.65 vs 9.82 ns for ridge at step 6). **Finding 2 below did not hold at 6 h:** ridge is slightly
+ahead at the horizon end (24.41 vs 26.54 ns; bootstrap only, Diebold–Mariano p = 0.47). Ridge is clearly
+best at 24 h (29.76 vs 59.02 ns). Kalman beats broadcast drift on I02 by 14% at 6 h and 50% at 24 h. On
+I09 the learned models got much worse (attention-LSTM 15.1 → 39.6 ns at 1.5 h, step 1).
+
+The tables below are from the first run: 68 days (15 Jul – 21 Sep 2026) of broadcast clocks for three
+NavIC satellites (I02: 6,633 samples, I09: 2,379, I10: 2,699; ~912 s cadence). MAE in nanoseconds,
+walk-forward evaluation over 3 folds; neural models are averaged over 3 seeds (± = seed std). The anomaly
+results in finding 4 are also from this run.
 
 **1. The satellite's own broadcast drift is a very strong baseline.** Averaged over satellites,
 1.5 h ahead (6 steps):
@@ -69,19 +78,22 @@ At the 1.5 h horizon the attention-LSTM and ridge are statistically indistinguis
 learned models are roughly 2–4× worse than broadcast drift and vary a lot across seeds, and attention
 is not uniformly better than a plain LSTM. Any claim that learned models "win" is satellite-specific.
 
-**4. Broadcast-clock residuals are heavy-tailed.** One-step residuals have excess kurtosis of 80–96.
-Even in the _nominal_ training period 3.8% (I02), 11.2% (I09) and 29.6% (I10) of samples exceed 4σ,
-because ground-segment refits create frequent discontinuities. A Gaussian z-score threshold therefore
-produces many alerts. On injected faults the detectors reach ≥0.99 recall at ≥10σ, but precision is low
-(best F1 ≈ 0.25–0.35; ~35–50 alarms per 1000 clean held-out windows for the z-score/CUSUM detectors, ~3 for
-Isolation Forest). Flagged real events did **not** coincide with URA-index/health changes (lift 0.5× on
-I02, 1.7× on I09 from only 33 flags), so they cannot be labelled as uploads. Most natural jumps are
-isolated level shifts from routine refits (96% / 66% / 87% of |z| > 4 jumps on I02 / I09 / I10). A
-refit-aware detector that alarms only on spikes and sustained excursions cuts false alarms to 2.3 per
-1000 (F1 0.77–0.82 on spikes ≥ 10σ, 0.89 on ramps ≥ 5σ), but by design misses persistent step faults,
-which look identical to refits.
+**4. Broadcast-clock residuals are heavy-tailed.** On the six-month data, one-step residuals have excess
+kurtosis of 109–142, and even in the _nominal_ calibration period 4.2% (I02), 13.6% (I09) and 22.6% (I10)
+of samples exceed 4σ, because ground-segment refits create frequent discontinuities. A Gaussian z-score
+threshold therefore produces many alerts: the conventional detectors raise 47–81 alarms per 1000 clean
+held-out windows and reach an F1 of at most 0.14 on injected faults of 10σ. Most natural jumps are
+isolated level shifts from routine refits (96% / 76% / 81% of |z| > 4 jumps on I02 / I09 / I10). A
+refit-aware detector that alarms only on spikes and sustained excursions cuts false alarms to 4.3 per
+1000 (about 91% fewer than CUSUM, the best conventional detector) and reaches an F1 of 0.52 on spikes and
+0.63 on ramps at 10σ, but by design misses persistent step faults, which look identical to refits. On the
+68-day run the same detector gave 2.3 false alarms per 1000 and F1 0.77–0.89, so its absolute performance
+varies with the period. Flagged real events barely coincide with URA-index/health changes (1.4× chance on
+I02, none on I09/I10), so they cannot be labelled as uploads. Reproduce with
+`naviguard anomaly-eval --csv data/navic_telemetry_6mo.csv`.
 
-**Caveats.** Neural models are not tuned; the folds share data so significance tests are optimistic;
+**Caveats.** The results above use default model settings. Leak-free tuning on the 68-day data left every
+best model unchanged, and the six-month run is not retuned; the folds share data so significance tests are optimistic;
 the satellite average is dominated by the two hard satellites; NavIC coverage varies day to day (I06
 appears only in January data).
 
@@ -376,18 +388,17 @@ Clock-bias prediction with recurrent networks is an active area (verify details 
 
 Done: cross-satellite pooled models, the 24 h (96-step) horizon, per-satellite coverage reports,
 block-bootstrap confidence intervals for model comparisons, and a refit-aware anomaly detector that
-separates routine ground-segment refits from faults (~95% fewer false alarms; in `anomaly-eval` and
+separates routine ground-segment refits from faults (~91% fewer false alarms than CUSUM on six months; in `anomaly-eval` and
 `/anomaly-report`), a two-state Kalman-filter clock baseline, Docker (API + dashboard via docker
-compose), and a BKG/ESA mirror switch for downloads.
-
-In progress: six-month dataset (Apr–Sep 2026).
+compose), a BKG/ESA mirror switch for downloads, a six-month dataset and benchmark (14 Apr – 19 Oct
+2026), leak-free hyperparameter tuning (`naviguard tune`), 90% split-conformal forecast ranges
+(`naviguard intervals`), and overlapping Allan deviation (`naviguard allan`).
 
 Next:
 
-- Hyperparameter tuning of the neural models.
-- Probabilistic (quantile or conformal) forecasts.
+- Retune the models on the six-month data and explain the drop in learned-model accuracy on I09.
+- Serve the 90% forecast ranges through the API and dashboard.
 - Precise clocks for GPS/Galileo/BeiDou (IGS `.CLK`) as an external validation set.
-- Allan deviation (frequency-stability) reporting alongside MAE, the standard metric in clock science.
 - Versioned dataset releases with a DOI (e.g. Zenodo), so results stay reproducible even if the source
   archive changes.
 - A short guide to adding a new forecaster or detector, with config-driven experiments.
