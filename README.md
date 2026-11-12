@@ -224,7 +224,7 @@ then `... naviguard train-navic` once.
 ### Six-month telemetry checklist
 
 - [ ] Fetch the inclusive date range into a dedicated CSV:
-      `naviguard fetch --start 2026-04-01 --end 2026-09-21 --out data/navic_telemetry_6mo.csv`
+      `naviguard fetch --start 2026-04-14 --end 2026-10-19 --out data/navic_telemetry_6mo.csv`
 - [ ] Generate the per-satellite coverage and gap report:
       `naviguard coverage --csv data/navic_telemetry_6mo.csv --out-dir outputs/coverage`
 - [ ] Review `outputs/coverage/coverage.md` and the detailed `outputs/coverage/coverage.csv`.
@@ -359,6 +359,35 @@ missing/invalid API key.
 
 ---
 
+## Reproducing the six-month results
+
+These commands produce the six-month results quoted above and in the accompanying paper (14 Apr – 19 Oct
+2026, default model settings, 3 folds, 3 seeds per neural model, at most 40 epochs). The neural runs take
+several hours on a CPU. Small differences can come from TensorFlow builds and hardware.
+
+```bash
+# data (BKG archive, ESA mirror used automatically for missing days)
+naviguard fetch --start 2026-04-14 --end 2026-10-19 --out data/navic_telemetry_6mo.csv
+
+# benchmark at 1.5 h, 6 h and 24 h
+naviguard benchmark --csv data/navic_telemetry_6mo.csv --seeds 3 --epochs 40 --folds 3 --horizon 6 --out-dir outputs/benchmark6mo_h6
+naviguard benchmark --csv data/navic_telemetry_6mo.csv --seeds 3 --epochs 40 --folds 3 --horizon 24 --seq-len 48 --out-dir outputs/benchmark6mo_h24
+naviguard benchmark --csv data/navic_telemetry_6mo.csv --seeds 3 --epochs 40 --folds 3 --horizon 96 --seq-len 96 --min-windows 150 --out-dir outputs/benchmark6mo_h96
+
+# 90% split-conformal ranges (repeat for h24 and h96)
+naviguard intervals --bench-dir outputs/benchmark6mo_h6
+
+# clock stability, anomaly detectors, figures
+naviguard allan --csv data/navic_telemetry_6mo.csv --out-dir outputs/allan
+naviguard anomaly-eval --csv data/navic_telemetry_6mo.csv --out-dir outputs/anomaly_6mo
+naviguard report --bench "horizon 6=outputs/benchmark6mo_h6" --bench "horizon 24=outputs/benchmark6mo_h24" --bench "horizon 96=outputs/benchmark6mo_h96" --anomaly-dir outputs/anomaly_6mo --csv data/navic_telemetry_6mo.csv --out-dir outputs/figures
+```
+
+Each benchmark folder holds `results.csv`, `dm_tests.csv` (Diebold–Mariano against the attention-LSTM),
+`ci.csv` (block-bootstrap intervals) and `summary.md`.
+
+---
+
 ## Tests and CI
 
 ```bash
@@ -366,7 +395,7 @@ pytest -q
 ruff check src tests scripts
 ```
 
-The suite (~85 tests) is hermetic: no downloads, trained models, or LM Studio needed. It covers
+The suite (128 tests) is hermetic: no downloads, trained models, or LM Studio needed. It covers
 leakage-free splitting, the RINEX parser, fold purging, model shapes, the Diebold–Mariano test, the
 anomaly evaluation, the navic train/save/load round trip, and the API in both profiles. GitHub Actions
 (`.github/workflows/ci.yml`) runs both commands on every push and pull request.
@@ -375,12 +404,29 @@ anomaly evaluation, the navic train/save/load round trip, and the API in both pr
 
 ## Related work
 
-Clock-bias prediction with recurrent networks is an active area (verify details before citing):
+Clock-bias prediction with recurrent networks:
 
-1. Huang B., Ji Z. (2021) — SL-LSTM for GPS clock bias, _GPS Solutions_
-2. He S., Liu J. (2023) — LSTM for BDS-3 clock prediction, _GPS Solutions_
-3. Cai C., Liu M. (2024) — LSTM-Attention for BDS, _GPS Solutions_
-4. Bhatt A., Mehta I. (2024) — LSTM for Galileo clock bias, _arXiv:2411.07015_
+1. Wen T. et al. (2021). A novel long short-term memory predicted algorithm for BDS short-term satellite
+   clock offsets. _Int. J. Aerospace Engineering_, 4066275. doi:10.1155/2021/4066275
+2. Cai C. et al. (2024). Enhancing satellite clock bias prediction in BDS with LSTM-attention model.
+   _GPS Solutions_ 28(2), 92. doi:10.1007/s10291-024-01640-8
+3. Liu H. et al. (2024). Improved SSA-based GRU neural network for BDS-3 satellite clock bias forecasting.
+   _Sensors_ 24(4), 1178. doi:10.3390/s24041178
+4. Bhatt A., Mehta I., Patidar P. (2024). Leveraging LSTM for predictive modeling of satellite clock bias.
+   _arXiv:2411.07015_
+5. Lv K. et al. (2025). Prediction of BDS-3 satellite clock bias based on EWT-LSTM ensemble model.
+   _GPS Solutions_ 29(3), 123. doi:10.1007/s10291-025-01886-w
+6. Ma J. et al. (2026). Prediction and performance of BDS satellite clock bias based on
+   CNN-LSTM-Attention model. _Sensors_ 26(2), 422. doi:10.3390/s26020422
+
+NavIC clocks and orbits:
+
+7. Montenbruck O., Steigenberger P., Riley S. (2015). IRNSS orbit determination and broadcast ephemeris
+   assessment. _Proc. ION ITM 2015_, 185–193.
+8. Varsha H. S. et al. (2020). Precise orbit and clock estimation of navigational satellite using extended
+   Kalman filter applicable to IRNSS NavIC receiver data. Springer, 169–179. doi:10.1007/978-981-15-0790-8_18
+9. Rajaiah K. et al. (2022). Satellite time keeping methodology for IRNSS/NavIC constellation.
+   _Gyroscopy and Navigation_ 13(3), 149–154. doi:10.1134/S2075108722030075
 
 ---
 
@@ -409,7 +455,9 @@ Next:
 
 ## Contributors
 
-Siddhant — modelling, benchmark, API, real-data pipeline · Om — preprocessing · Pratyush Narain —
-dashboard design.
+Siddhant — modelling, benchmark, API, real-data pipeline · Om — preprocessing, six-month dataset and
+Allan deviation · Pratyush Narain — dashboard design and Docker.
+
+Released under the [MIT License](LICENSE).
 
 _Relevant to SDG 9 (Industry, Innovation and Infrastructure): dependable satellite-navigation timing._

@@ -7,6 +7,7 @@ name = "naviguard"
 version = "0.3.0"
 description = "Clock-bias forecasting and anomaly monitoring for NavIC satellites, benchmarked on real broadcast clock data"
 requires-python = ">=3.11"
+license = { file = "LICENSE" }
 dependencies = [
     "numpy>=2.1",
     "pandas>=2.2",
